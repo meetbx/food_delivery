@@ -1,13 +1,13 @@
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
+
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
-
+const db = require('./db');
 // Import delivery ETA helper service
 const { getEstimatedDeliveryTime } = require('./services/deliveryService');
 const trialOrderRouter = require('./routes/trialOrder');
@@ -22,13 +22,11 @@ const riderAuthRoutes = require('./routes/riderAuth');
 const userAuthRoutes = require('./routes/userAuth');
 const addressRoutes = require('./routes/addressRoutes');
 
-// 1. Database Pool
 const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: 'crave_db' || 'food_ordering_app',
-  password: '1234' || 'postgres',
-  port: process.env.DB_PORT || 5432,
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' 
+    ? { rejectUnauthorized: false } 
+    : false
 });
 
 pool.connect((err, client, release) => {
@@ -38,7 +36,6 @@ pool.connect((err, client, release) => {
   console.log('✅ Connected to PostgreSQL Database successfully!');
   release();
 });
-
 // 2. Middleware
 app.use(cors({
   origin: ['http://localhost:5173', 'http://localhost:5174'],
