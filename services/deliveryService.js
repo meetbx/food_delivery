@@ -1,0 +1,72 @@
+// backend/services/deliveryService.js
+const axios = require('axios');
+
+// In-memory cache for ETA calculations: "restaurantId-lat-lng" -> { etaText, timestamp }
+const etaCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000; // Cache TTL: 10 minutes
+
+/**
+ * Calculates estimated delivery time based on driving distance + base prep time.
+ */
+async function getEstimatedDeliveryTime(restaurantLat, restaurantLng, customerLat, customerLng, fallbackStaticTime) {
+  // If customer or restaurant coordinates are missing, return static fallback
+  if (!customerLat || !customerLng || !restaurantLat || !restaurantLng) {
+    return fallbackStaticTime || '25-35 min';
+  }
+
+  const cLat = parseFloat(customerLat);
+  const cLng = parseFloat(customerLng);
+  const rLat = parseFloat(restaurantLat);
+  const rLng = parseFloat(restaurantLng);
+
+  if (isNaN(cLat) || isNaN(cLng) || isNaN(rLat) || isNaN(rLng)) {
+    return fallbackStaticTime || '25-35 min';
+  }
+
+  // Cache Key rounded to 3 decimal places (~100m accuracy) to maximize cache hits
+  const cacheKey = `${rLat.toFixed(3)},${rLng.toFixed(3)}-${cLat.toFixed(3)},${cLng.toFixed(3)}`;
+  const cached = etaCache.get(cacheKey);
+
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+    return cached.etaText;
+  }
+
+  try {
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) {
+      console.warn('GOOGLE_MAPS_API_KEY not set. Falling back to static delivery time.');
+      return fallbackStaticTime || '25-35 min';
+    }
+
+    // Google Distance Matrix API endpoint
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${rLat},${rLng}&destinations=${cLat},${cLng}&mode=driving&key=${apiKey}`;
+    const response = await axios.get(url);
+
+    const data = response.data;
+    if (
+      data.status === 'OK' &&
+      data.rows?.[0]?.elements?.[0]?.status === 'OK'
+    ) {
+      const element = data.rows[0].elements[0];
+      const durationInSeconds = element.duration.value; // driving time in seconds
+      const drivingMinutes = Math.ceil(durationInSeconds / 60);
+
+      // Total Time = Kitchen Prep Time (~15 mins) + Buffer (~5 mins) + Driving Time
+      const PREP_AND_BUFFER_TIME = 20;
+      const minEta = drivingMinutes + PREP_AND_BUFFER_TIME;
+      const maxEta = minEta + 10;
+      const calculatedEta = `${minEta}-${maxEta} min`;
+
+      // Store in Cache
+      etaCache.set(cacheKey, { etaText: calculatedEta, timestamp: Date.now() });
+
+      return calculatedEta;
+    }
+  } catch (err) {
+    console.error('Distance Matrix API Error:', err.message);
+  }
+
+  return fallbackStaticTime || '25-35 min';
+}
+
+module.exports = { getEstimatedDeliveryTime };
