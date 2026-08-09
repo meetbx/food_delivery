@@ -1,25 +1,23 @@
 const { Pool } = require('pg');
+
 if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
+  require('dotenv').config({ override: false });
 }
 
-const isProduction = process.env.NODE_ENV === 'production';
-
-// Add this line right before creating your Pool or Sequelize instance:
-console.log("Attempting DB Connection to:", process.env.DATABASE_URL ? "URL provided" : "UNDEFINED");
-console.log("Full DB String (First 20 chars):", process.env.DATABASE_URL?.substring(0, 20));
 console.log("Using Connection String:", process.env.DATABASE_URL);
+
+// ONLY pass connectionString and ssl (remove PGUSER, PGHOST, PGDATABASE, etc.)
 const pool = new Pool({
-  user: process.env.PGUSER,
-  host: process.env.PGHOST,
-  database: process.env.PGDATABASE,
-  password: process.env.PGPASSWORD,
-  port: process.env.PGPORT,
-connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+pool.on('connect', () => {
+  console.log("✅ Successfully connected to PostgreSQL database!");
+});
 
-
+pool.on('error', (err) => {
+  console.error("❌ Unexpected database error:", err);
+});
 
 module.exports = pool;
