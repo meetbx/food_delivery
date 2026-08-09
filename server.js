@@ -22,20 +22,9 @@ const riderAuthRoutes = require('./routes/riderAuth');
 const userAuthRoutes = require('./routes/userAuth');
 const addressRoutes = require('./routes/addressRoutes');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' 
-    ? { rejectUnauthorized: false } 
-    : false
-});
 
-pool.connect((err, client, release) => {
-  if (err) {
-    return console.error('❌ PostgreSQL connection error:', err.stack);
-  }
-  console.log('✅ Connected to PostgreSQL Database successfully!');
-  release();
-});
+
+
 // 2. Middleware
 app.use(cors({
   origin: ['http://localhost:5173', 'http://localhost:5174'],
