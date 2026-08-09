@@ -4,20 +4,20 @@ if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config({ override: false });
 }
 
-console.log("Using Connection String:", process.env.DATABASE_URL);
-
-// ONLY pass connectionString and ssl (remove PGUSER, PGHOST, PGDATABASE, etc.)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: {
+    rejectUnauthorized: false // Always allow SSL for Render/External PostgreSQL
+  }
 });
 
-pool.on('connect', () => {
-  console.log("✅ Successfully connected to PostgreSQL database!");
-});
-
-pool.on('error', (err) => {
-  console.error("❌ Unexpected database error:", err);
+// Test connection on server startup
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ PostgreSQL connection error:', err);
+  } else {
+    console.log('✅ Connected to PostgreSQL successfully at:', res.rows[0].now);
+  }
 });
 
 module.exports = pool;
