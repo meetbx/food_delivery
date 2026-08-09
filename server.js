@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
-require('dotenv').config();
+require('dotenv').config({ override: false });
 // Import delivery ETA helper service
 const { getEstimatedDeliveryTime } = require('./services/deliveryService');
 const trialOrderRouter = require('./routes/trialOrder');
