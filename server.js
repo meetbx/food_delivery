@@ -26,12 +26,27 @@ const addressRoutes = require('./routes/addressRoutes');
 
 
 // 2. Middleware
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174'],
-  credentials: true
-}));
-app.use(express.json());
+// ✅ Updated CORS configuration allowing Vercel deployment & localhost
+const allowedOrigins = [
+  'https://food-front-delivery-245r-mu.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:5174'
+];
 
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (e.g. mobile apps, Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 // Add route handlers
 app.use('/api/auth', userAuthRoutes);
 app.use('/api/addresses', addressRoutes);
