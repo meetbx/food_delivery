@@ -22,8 +22,8 @@ const riderAuthRoutes = require('./routes/riderAuth');
 const userAuthRoutes = require('./routes/userAuth');
 const addressRoutes = require('./routes/addressRoutes');
 
-
-
+// Parse JSON payloads
+app.use(express.json());
 
 // 2. Middleware
 // ✅ Updated CORS configuration allowing Vercel deployment & localhost
@@ -53,11 +53,13 @@ app.use('/api/addresses', addressRoutes);
 app.use('/api/rider', riderAuthRoutes);
 app.use('/api', trialOrderRouter);
 initSocket(server);
+
 // Health Check
 app.get('/', (req, res) => {
   res.send('API Server Running Successfully');
 });
-router.get('/eta', async (req, res) => {
+
+app.get('/api/eta', async (req, res) => {
   try {
     const { restaurantLat, restaurantLng, customerLat, customerLng, fallback } = req.query;
 
@@ -75,7 +77,6 @@ router.get('/eta', async (req, res) => {
   }
 });
 
-module.exports = router;
 // -------------------------------------------------------------
 // RESTAURANT FETCH ROUTES (WITH DYNAMIC ETA CALCULATION)
 // -------------------------------------------------------------
@@ -123,7 +124,7 @@ app.get('/api/restaurants', async (req, res) => {
 
     // Filter by Category / Cuisine / Search Term (if provided)
     if (filterText && filterText.trim() !== '') {
-      const cleanFilter = filterText.trim().replace(/(?<!s)s$/i, '');
+      const cleanFilter = filterText.trim().replace(/s$/i, '');
       params.push(`%${cleanFilter}%`);
       
       conditions.push(`(cuisine_type ILIKE $${params.length} OR name ILIKE $${params.length})`);
@@ -144,7 +145,7 @@ app.get('/api/restaurants', async (req, res) => {
       let fallbackConditions = [];
 
       if (filterText && filterText.trim() !== '') {
-        const cleanFilter = filterText.trim().replace(/(?<!s)s$/i, '');
+        const cleanFilter = filterText.trim().replace(/s$/i, '');
         fallbackParams.push(`%${cleanFilter}%`);
         fallbackConditions.push(`(cuisine_type ILIKE $1 OR name ILIKE $1)`);
       }
@@ -196,6 +197,7 @@ app.get('/api/restaurants', async (req, res) => {
     res.status(500).json({ error: 'Server error fetching restaurants' });
   }
 });
+
 // GET /api/restaurants/:id
 app.get('/api/restaurants/:id', async (req, res) => {
   try {
@@ -665,6 +667,7 @@ app.post('/api/orders', async (req, res) => {
     res.status(500).json({ message: error.message || 'Database error placing order' });
   }
 });
+
 // GET /api/admin/orders
 app.get('/api/admin/orders', async (req, res) => {
   try {
@@ -708,7 +711,6 @@ app.patch('/api/orders/:id/status', async (req, res) => {
   }
 });
 
-// GET /api/orders/:id (Live Tracking Endpoint)
 // GET /api/orders/:id (Live Tracking Endpoint)
 const getOrderDetails = async (req, res) => {
   const { id } = req.params;
@@ -798,6 +800,7 @@ const getOrderDetails = async (req, res) => {
 
 app.get('/api/orders/:id', getOrderDetails);
 app.get('/api/order-tracking/:id', getOrderDetails);
+
 // -------------------------------------------------------------
 // RESTAURANT PARTNER PANEL ROUTES (AUTHENTICATION & ORDERS)
 // -------------------------------------------------------------
