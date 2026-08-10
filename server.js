@@ -713,6 +713,12 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
 // GET /api/orders/:id (Live Tracking Endpoint)
 const getOrderDetails = async (req, res) => {
+
+  // Prevent HTTP 304 caching so order tracking stays fresh
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   const { id } = req.params;
 
   if (!id || id === 'undefined' || id === 'null' || isNaN(Number(id))) {
