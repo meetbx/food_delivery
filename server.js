@@ -7,7 +7,7 @@ const router = express.Router();
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
-const db = require('./db');
+const pool = require('./db');
 // Import delivery ETA helper service
 const { getEstimatedDeliveryTime } = require('./services/deliveryService');
 const trialOrderRouter = require('./routes/trialOrder');
