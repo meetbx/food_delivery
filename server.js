@@ -276,40 +276,40 @@ app.get('/api/search', async (req, res) => {
 
     const query = `
       SELECT 
-        r.id AS restaurant_id,
-        r.name AS restaurant_name,
-        r.cuisine_type,
-        r.address,
-        r.city,
-        r.rating,
-        r.image_url AS restaurant_image,
-        r.delivery_time,
-        r.latitude,
-        r.longitude,
-        json_agg(
-          json_build_object(
-            'id', m.id,
-            'name', m.name,
-            'price', m.price,
-            'description', m.description,
-            'category', m.category,
-            'is_veg', m.is_veg,
-            'image_url', m.image_url
-          )
-        ) AS matching_dishes
-      FROM restaurants r
-      JOIN menu_items m ON r.id = m.restaurant_id
-      WHERE (
-        LOWER(m.name) LIKE LOWER($1)
-        OR LOWER(m.description) LIKE LOWER($1)
-        OR LOWER(m.category) LIKE LOWER($1)
-        OR LOWER(r.name) LIKE LOWER($1)
-        OR LOWER(r.cuisine_type) LIKE LOWER($1)
-      )
-      AND r.is_active = TRUE 
-      AND m.is_available = TRUE
-      GROUP BY r.id, r.name, r.cuisine_type, r.address, r.city, r.rating, r.image_url, r.delivery_time, r.latitude, r.longitude
-      ORDER BY r.rating DESC;
+  r.id,
+  r.name,
+  r.cuisine_type,
+  r.address,
+  r.city,
+  r.rating,
+  r.image_url,
+  r.delivery_time,
+  r.latitude,
+  r.longitude,
+  json_agg(
+    json_build_object(
+      'id', m.id,
+      'name', m.name,
+      'price', m.price,
+      'description', m.description,
+      'category', m.category,
+      'is_veg', m.is_veg,
+      'image_url', m.image_url
+    )
+  ) AS matching_dishes
+FROM restaurants r
+JOIN menu_items m ON r.id = m.restaurant_id
+WHERE (
+  LOWER(m.name) LIKE LOWER($1)
+  OR LOWER(m.description) LIKE LOWER($1)
+  OR LOWER(m.category) LIKE LOWER($1)
+  OR LOWER(r.name) LIKE LOWER($1)
+  OR LOWER(r.cuisine_type) LIKE LOWER($1)
+)
+AND r.is_active = TRUE 
+AND m.is_available = TRUE
+GROUP BY r.id, r.name, r.cuisine_type, r.address, r.city, r.rating, r.image_url, r.delivery_time, r.latitude, r.longitude
+ORDER BY r.rating DESC;
     `;
 
     const searchPattern = `%${searchTerm.trim()}%`;
