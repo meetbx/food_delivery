@@ -7,12 +7,14 @@ const { Pool } = require('pg');
 const Redis = require('ioredis');
 
 // 2. Initialize Redis
-const redis = new Redis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
+const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+
+const redis = new Redis(redisUrl, {
+  enableOfflineQueue: false, // STOP INFINITE LOADING: Fails fast if Redis is disconnected
+  connectTimeout: 5000,      // Times out connection attempts after 5 seconds
+  maxRetriesPerRequest: 1,   // Rejects failed commands instead of hanging requests
   keepAlive: 10000,
-  // Required if using cloud providers like Upstash or Redis Cloud using SSL (rediss://)
-  tls: process.env.REDIS_URL?.startsWith('rediss://') ? {} : undefined
+  tls: redisUrl.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined
 });
 
 let isConnected = false;
