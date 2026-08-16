@@ -9,6 +9,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 const pool = require('./db');
 // Import delivery ETA helper service
+const { updateDriverLocation, findNearbyDrivers, removeDriverLocation } = require('./services/deliveryService');
 const { getEstimatedDeliveryTime } = require('./services/deliveryService');
 const trialOrderRouter = require('./routes/trialOrder');
 const http = require('http');
