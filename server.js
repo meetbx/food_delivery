@@ -9,8 +9,14 @@ if (process.env.NODE_ENV !== 'production') {
 }
 const pool = require('./db');
 // Import delivery ETA helper service
-const { updateDriverLocation, findNearbyDrivers, removeDriverLocation } = require('./services/deliveryService');
-const { getEstimatedDeliveryTime } = require('./services/deliveryService');
+const { 
+  updateDriverLocation, 
+  findNearbyDrivers, 
+  removeDriverLocation, 
+  getEstimatedDeliveryTime,
+  findDriversNearRestaurant // Optional helper, or use findNearbyDrivers directly
+} = require('./services/deliveryService');
+
 const trialOrderRouter = require('./routes/trialOrder');
 const http = require('http');
 const { initSocket } = require('./socket');
@@ -642,26 +648,26 @@ app.post('/api/orders', async (req, res) => {
     `;
 
     const orderValues = [
-      activeUserId ? Number(activeUserId) : null,                      // $1: user_id
-      restaurant_id ? Number(restaurant_id) : null,                  // $2
-      fetchedAddress || delivery_address || 'Address Not Provided',  // $3: auto-fetched full address
-      fetchedLat ? Number(fetchedLat) : null,                        // $4: latitude
-      fetchedLng ? Number(fetchedLng) : null,                        // $5: longitude
-      itemsJson,                                                     // $6
-      Number(item_total || 0),                                       // $7
-      Number(tax || 0),                                              // $8
-      Number(delivery_fee || 0),                                     // $9
-      Number(discount || 0),                                         // $10
-      calcTotal,                                                     // $11
-      'Pending',                                                     // $12
-      payment_status || 'Pending',                                   // $13
-      payment_method || 'Cash on Delivery'                           // $14
+      activeUserId ? Number(activeUserId) : null,
+      restaurant_id ? Number(restaurant_id) : null,
+      fetchedAddress || delivery_address || 'Address Not Provided',
+      fetchedLat ? Number(fetchedLat) : null,
+      fetchedLng ? Number(fetchedLng) : null,
+      itemsJson,
+      Number(item_total || 0),
+      Number(tax || 0),
+      Number(delivery_fee || 0),
+      Number(discount || 0),
+      calcTotal,
+      'Pending',
+      payment_status || 'Pending',
+      payment_method || 'Cash on Delivery'
     ];
 
     const orderResult = await pool.query(orderQuery, orderValues);
     const newOrder = orderResult.rows[0];
 
-    // Order items insertion logic remains unchanged
+    // 5. Insert order items into order_items table
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       for (const entry of rawItems) {
         try {
@@ -681,11 +687,49 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
+    // -------------------------------------------------------------
+    // 6. REDIS GEO: Fetch Restaurant Coordinates & Query 3km Radius
+    // -------------------------------------------------------------
+    let nearbyDrivers = [];
+    let restaurantLocation = null;
+
+    if (restaurant_id) {
+      try {
+        const restResult = await pool.query(
+          'SELECT latitude, longitude, name FROM restaurants WHERE id = $1',
+          [Number(restaurant_id)]
+        );
+
+        if (restResult.rows.length > 0) {
+          const { latitude, longitude, name } = restResult.rows[0];
+          restaurantLocation = { latitude, longitude, name };
+
+          if (latitude !== null && longitude !== null) {
+            const restLat = parseFloat(latitude);
+            const restLng = parseFloat(longitude);
+            const SEARCH_RADIUS_KM = 3;
+
+            // Query Redis Geo for active drivers within 3 km of the restaurant
+            nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
+          }
+        }
+      } catch (geoErr) {
+        console.error('⚠️ Redis Geo driver match failed:', geoErr.message);
+      }
+    }
+
+    // 7. Return Order details along with nearby drivers found within 3km
     res.status(201).json({
       message: 'Order placed successfully!',
       order_id: newOrder.id,
       orderId: newOrder.id,
-      order: newOrder
+      order: newOrder,
+      dispatch: {
+        restaurant: restaurantLocation,
+        searchRadiusKm: 3,
+        driversFoundCount: nearbyDrivers.length,
+        nearbyDrivers // Array of nearby drivers sorted by distance
+      }
     });
 
   } catch (error) {
@@ -693,7 +737,6 @@ app.post('/api/orders', async (req, res) => {
     res.status(500).json({ message: error.message || 'Database error placing order' });
   }
 });
-
 // GET /api/admin/orders
 app.get('/api/admin/orders', async (req, res) => {
   try {
