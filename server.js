@@ -201,24 +201,27 @@ app.get('/api/restaurants', async (req, res) => {
 // Temporary test route
 app.get('/api/test-redis-geo', async (req, res) => {
   try {
-    // 1. Add sample driver locations (Longitude, Latitude)
-    await updateDriverLocation('driver_test_1', 77.5946, 12.9716); // Point A
-    await updateDriverLocation('driver_test_2', 77.6000, 12.9750); // ~0.7 km away
+    // 1. Add sample driver coordinates
+    await updateDriverLocation('driver_test_1', 77.5946, 12.9716);
+    await updateDriverLocation('driver_test_2', 77.6000, 12.9750);
 
-    // 2. Query drivers within 5km radius of Point A
+    // 2. Query nearby drivers within 5km
     const nearby = await findNearbyDrivers(77.5946, 12.9716, 5);
 
     // 3. Clean up test data
     await removeDriverLocation('driver_test_1');
     await removeDriverLocation('driver_test_2');
 
-    res.json({
+    // ALWAYS send a response back
+    return res.json({
       success: true,
       message: 'Redis Geo is working!',
       nearbyDrivers: nearby
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Test endpoint error:', error);
+    // Send error response so the browser stops loading
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 // GET /api/restaurants/:id
