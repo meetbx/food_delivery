@@ -7,8 +7,7 @@ const router = express.Router();
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
-const pool = require('./db');
-// Import delivery ETA helper service
+const { pool } = require('./db');// Import delivery ETA helper service
 const { 
   updateDriverLocation, 
   findNearbyDrivers, 
