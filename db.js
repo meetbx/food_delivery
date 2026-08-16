@@ -9,13 +9,29 @@ const Redis = require('ioredis');
 // 2. Initialize Redis
 const redis = new Redis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', {
   maxRetriesPerRequest: null,
-  enableReadyCheck: false,
+  enableReadyCheck: true,
+  keepAlive: 10000,
   // Required if using cloud providers like Upstash or Redis Cloud using SSL (rediss://)
   tls: process.env.REDIS_URL?.startsWith('rediss://') ? {} : undefined
 });
 
-redis.on('connect', () => console.log('✅ Redis connected successfully'));
-redis.on('error', (err) => console.error('❌ Redis connection error:', err));
+let isConnected = false;
+
+// Fires only when the connection is ready for commands
+redis.on('ready', () => {
+  if (!isConnected) {
+    console.log('✅ Redis connected and ready');
+    isConnected = true;
+  }
+});
+
+// Quietly handle routine connection resets during auto-reconnect
+redis.on('error', (err) => {
+  if (err.code === 'ECONNRESET') {
+    return; // Prevents log spam when server drops idle connections
+  }
+  console.error('❌ Redis Connection Error:', err.message);
+});
 
 // 3. Initialize PostgreSQL
 const isProduction = process.env.NODE_ENV === 'production';
