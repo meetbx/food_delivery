@@ -1,9 +1,65 @@
-// backend/services/deliveryService.js
 const axios = require('axios');
+const { redis } = require('../db'); // Import the exported Redis instance from your db.js
+
+const DRIVER_GEO_KEY = 'drivers:locations';
 
 // In-memory cache for ETA calculations: "restaurantId-lat-lng" -> { etaText, timestamp }
 const etaCache = new Map();
 const CACHE_TTL_MS = 10 * 60 * 1000; // Cache TTL: 10 minutes
+
+/**
+ * Updates or sets a driver's real-time coordinates in Redis Geo Index.
+ * Note: Redis GEOADD takes coordinates in (Longitude, Latitude) order.
+ */
+async function updateDriverLocation(driverId, longitude, latitude) {
+  if (!driverId || longitude === undefined || latitude === undefined) {
+    throw new Error('driverId, longitude, and latitude are required');
+  }
+
+  const lng = parseFloat(longitude);
+  const lat = parseFloat(latitude);
+
+  if (isNaN(lng) || isNaN(lat)) {
+    throw new Error('Invalid coordinates provided');
+  }
+
+  // GEOADD drivers:locations <longitude> <latitude> <driverId>
+  await redis.geoadd(DRIVER_GEO_KEY, lng, lat, driverId.toString());
+}
+
+/**
+ * Finds drivers near a specific location within a given radius (in km).
+ */
+async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
+  const lng = parseFloat(longitude);
+  const lat = parseFloat(latitude);
+
+  if (isNaN(lng) || isNaN(lat)) {
+    throw new Error('Invalid coordinates provided');
+  }
+
+  // Uses GEOSEARCH (Redis 6.2+)
+  const nearbyDrivers = await redis.geosearch(
+    DRIVER_GEO_KEY,
+    'FROMLONLAT', lng, lat,
+    'BYRADIUS', radiusKm, 'km',
+    'WITHDIST',
+    'ASC'
+  );
+
+  return nearbyDrivers.map(([driverId, distance]) => ({
+    driverId,
+    distanceKm: parseFloat(distance)
+  }));
+}
+
+/**
+ * Removes a driver from the Geo index when they go offline or stop accepting orders.
+ */
+async function removeDriverLocation(driverId) {
+  if (!driverId) return;
+  await redis.zrem(DRIVER_GEO_KEY, driverId.toString());
+}
 
 /**
  * Calculates estimated delivery time based on driving distance + base prep time.
@@ -69,4 +125,9 @@ async function getEstimatedDeliveryTime(restaurantLat, restaurantLng, customerLa
   return fallbackStaticTime || '25-35 min';
 }
 
-module.exports = { getEstimatedDeliveryTime };
+module.exports = {
+  getEstimatedDeliveryTime,
+  updateDriverLocation,
+  findNearbyDrivers,
+  removeDriverLocation
+};
