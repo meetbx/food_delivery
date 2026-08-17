@@ -88,6 +88,7 @@ app.get('/api/eta', async (req, res) => {
 // -------------------------------------------------------------
 
 // GET /api/restaurants
+// GET /api/restaurants
 app.get('/api/restaurants', async (req, res) => {
   try {
     const { city, category, cuisine, search, q, address_id, lat, lng } = req.query;
@@ -98,7 +99,7 @@ app.get('/api/restaurants', async (req, res) => {
     // 1. Fetch lat/lng from addresses table FIRST if address_id is provided
     if (address_id) {
       const addressRes = await pool.query(
-        'SELECT latitude, longitude FROM addresses WHERE id = $1',
+        'SELECT latitude, longitude, city FROM addresses WHERE id = $1',
         [address_id]
       );
       if (addressRes.rows.length > 0) {
@@ -110,7 +111,7 @@ app.get('/api/restaurants', async (req, res) => {
       }
     }
 
-    // 2. Fall back to raw GPS parameters only if no address_id was matched/provided
+    // 2. Fall back to raw GPS parameters if no address_id was matched/provided
     if (userLat === null && userLng === null) {
       userLat = (lat && !isNaN(parseFloat(lat))) ? parseFloat(lat) : null;
       userLng = (lng && !isNaN(parseFloat(lng))) ? parseFloat(lng) : null;
@@ -119,24 +120,27 @@ app.get('/api/restaurants', async (req, res) => {
     // Pick whichever filter parameter the frontend sends
     const filterText = category || cuisine || search || q;
 
-    let conditions = [];
+    let conditions = ['is_active = TRUE'];
     let params = [];
 
-    // Filter by City (if provided)
+    // Filter by City using Fuzzy Matching (ILIKE across city, address, and full_address)
     if (city && city.trim() !== '') {
-      params.push(city.trim());
-      conditions.push(`LOWER(city) = LOWER($${params.length})`);
+      params.push(`%${city.trim()}%`);
+      conditions.push(`(
+        city ILIKE $${params.length} 
+        OR address ILIKE $${params.length} 
+        OR full_address ILIKE $${params.length}
+      )`);
     }
 
     // Filter by Category / Cuisine / Search Term (if provided)
     if (filterText && filterText.trim() !== '') {
       const cleanFilter = filterText.trim().replace(/s$/i, '');
       params.push(`%${cleanFilter}%`);
-      
       conditions.push(`(cuisine_type ILIKE $${params.length} OR name ILIKE $${params.length})`);
     }
 
-    // Build the SQL query dynamically
+    // Build the primary query
     let queryText = 'SELECT * FROM restaurants';
     if (conditions.length > 0) {
       queryText += ' WHERE ' + conditions.join(' AND ');
@@ -145,10 +149,10 @@ app.get('/api/restaurants', async (req, res) => {
 
     let result = await pool.query(queryText, params);
 
-    // Fallback: If searching with a city returned 0 rows, attempt fallback
-    if (result.rows.length === 0 && city) {
+    // Fallback: If strict/fuzzy matching returned 0 rows, return all active restaurants
+    if (result.rows.length === 0) {
       let fallbackParams = [];
-      let fallbackConditions = [];
+      let fallbackConditions = ['is_active = TRUE'];
 
       if (filterText && filterText.trim() !== '') {
         const cleanFilter = filterText.trim().replace(/s$/i, '');
@@ -156,12 +160,7 @@ app.get('/api/restaurants', async (req, res) => {
         fallbackConditions.push(`(cuisine_type ILIKE $1 OR name ILIKE $1)`);
       }
 
-      let fallbackQuery = 'SELECT * FROM restaurants';
-      if (fallbackConditions.length > 0) {
-        fallbackQuery += ' WHERE ' + fallbackConditions.join(' AND ');
-      }
-      fallbackQuery += ' ORDER BY id DESC;';
-
+      let fallbackQuery = 'SELECT * FROM restaurants WHERE ' + fallbackConditions.join(' AND ') + ' ORDER BY id DESC;';
       result = await pool.query(fallbackQuery, fallbackParams);
     }
 
@@ -170,7 +169,6 @@ app.get('/api/restaurants', async (req, res) => {
       result.rows.map(async (rest) => {
         let dynamicEta = rest.delivery_time || '25-35 mins';
 
-        // Only calculate distance/ETA if we have valid customer coordinates and restaurant coordinates
         if (userLat !== null && userLng !== null && rest.latitude !== null && rest.longitude !== null) {
           try {
             const calculatedEta = await getEstimatedDeliveryTime(
@@ -185,7 +183,6 @@ app.get('/api/restaurants', async (req, res) => {
             }
           } catch (calcError) {
             console.error(`[ETA ERROR] Failed to calculate ETA for rest ID ${rest.id}:`, calcError);
-            // Fallback to static delivery_time if distance calculation fails
             dynamicEta = rest.delivery_time || '25-35 mins';
           }
         }
