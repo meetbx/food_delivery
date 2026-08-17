@@ -32,9 +32,26 @@ const initSocket = (server) => {
       console.log(`Socket ${socket.id} joined room ${roomName}`);
     });
 
-    // 2. Receive live coordinates from Simulator or Rider App
+    // 2. Register Rider / Driver into personal notification rooms
+    socket.on('register_rider', ({ riderId, driverId }) => {
+      const activeId = riderId || driverId;
+      if (!activeId) return;
+
+      currentDriverId = activeId;
+      
+      // Clean prefix if passed in raw format
+      const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+
+      // Join both room prefixes so backend emits to driver_X or rider_X always reach this socket
+      socket.join(`driver_${cleanId}`);
+      socket.join(`rider_${cleanId}`);
+
+      console.log(`📡 Socket ${socket.id} joined rooms: driver_${cleanId} & rider_${cleanId}`);
+    });
+
+    // 3. Receive live coordinates from Simulator or Rider App
     socket.on('send_rider_location', async (data) => {
-      const { orderId, driverId, lat, lng, heading } = data;
+      const { orderId, driverId, riderId, lat, lng, heading } = data;
       if (lat == null || lng == null) return;
 
       const latitude = parseFloat(lat);
@@ -43,14 +60,18 @@ const initSocket = (server) => {
       if (isNaN(latitude) || isNaN(longitude)) return;
 
       // Track current driver associated with this socket instance
-      if (driverId) {
-        currentDriverId = driverId;
+      const targetDriverId = driverId || riderId || currentDriverId;
+      if (targetDriverId) {
+        currentDriverId = targetDriverId;
       }
 
       // Update spatial index in Redis Geo (Longitude, Latitude)
       if (currentDriverId) {
+        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
         try {
-          await updateDriverLocation(currentDriverId, longitude, latitude);
+          // Sync both key formats in Redis Geo
+          await updateDriverLocation(`driver_${cleanId}`, longitude, latitude);
+          await updateDriverLocation(`rider_${cleanId}`, longitude, latitude);
         } catch (err) {
           console.error(`Error updating Redis location for driver ${currentDriverId}:`, err.message);
         }
@@ -70,37 +91,41 @@ const initSocket = (server) => {
       }
     });
 
-    // 3. Express Rider Offline status explicitly
-    socket.on('driver_offline', async ({ driverId }) => {
-      const idToRemove = driverId || currentDriverId;
+    // 4. Express Rider Offline status explicitly
+    socket.on('driver_offline', async ({ driverId, riderId }) => {
+      const idToRemove = driverId || riderId || currentDriverId;
       if (idToRemove) {
+        const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
         try {
-          await removeDriverLocation(idToRemove);
-          console.log(`Driver ${idToRemove} marked offline in Redis`);
+          await removeDriverLocation(`driver_${cleanId}`);
+          await removeDriverLocation(`rider_${cleanId}`);
+          console.log(`Driver ${cleanId} marked offline in Redis`);
         } catch (err) {
-          console.error(`Error removing driver ${idToRemove} from Redis:`, err.message);
+          console.error(`Error removing driver ${cleanId} from Redis:`, err.message);
         }
       }
     });
 
-    // 4. Leave Order Room
+    // 5. Leave Order Room
     socket.on('leave_trial_room', ({ orderId }) => {
       const roomName = `order_${orderId}`;
       socket.leave(roomName);
       console.log(`Socket ${socket.id} left room ${roomName}`);
     });
 
-    // 5. Cleanup on Disconnect
+    // 6. Cleanup on Disconnect
     socket.on('disconnect', async () => {
       console.log(`[Socket Disconnected]: ${socket.id}`);
       
       // Optionally purge location from Redis if socket drops abruptly
       if (currentDriverId) {
+        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
         try {
-          await removeDriverLocation(currentDriverId);
-          console.log(`Removed disconnected driver ${currentDriverId} from Redis spatial index`);
+          await removeDriverLocation(`driver_${cleanId}`);
+          await removeDriverLocation(`rider_${cleanId}`);
+          console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
         } catch (err) {
-          console.error(`Failed cleanup for driver ${currentDriverId}:`, err.message);
+          console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
         }
       }
     });
