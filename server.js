@@ -18,7 +18,7 @@ const {
 
 const trialOrderRouter = require('./routes/trialOrder');
 const http = require('http');
-const { initSocket } = require('./socket');
+const { initSocket, getIo } = require('./socket');
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
