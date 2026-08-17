@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db'); // Adjust relative path to your db pool file
-const { verifyCustomerToken } = require('../middleware/authMiddleware'); // Adjust relative path to your auth middleware
+const pool = require('../db'); // Adjust path to your db pool file
+const { verifyCustomerToken } = require('../middleware/authMiddleware'); // Adjust path to auth middleware
 
-// 1. GET ALL SAVED ADDRESSES
+// 1. GET ALL SAVED ADDRESSES FOR LOGGED-IN USER
 router.get('/', verifyCustomerToken, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -12,11 +12,14 @@ router.get('/', verifyCustomerToken, async (req, res) => {
         id, 
         user_id AS customer_id, 
         full_address AS address, 
+        house_no,
         latitude, 
         longitude, 
         place_id, 
         label AS tag, 
         city,
+        pincode,
+        phone,
         is_default 
        FROM addresses 
        WHERE user_id = $1 
@@ -31,17 +34,20 @@ router.get('/', verifyCustomerToken, async (req, res) => {
   }
 });
 
-// 2. ADD NEW ADDRESS
+// 2. ADD NEW ADDRESS (POST ROUTE)
 router.post('/', verifyCustomerToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { 
       address, 
+      house_no = '',
+      city = 'Default City',
+      pincode = '000000',
+      phone = '0000000000',
       latitude = null, 
       longitude = null, 
       place_id = null, 
       tag = 'Home', 
-      city = 'Default City',
       is_default = false 
     } = req.body;
 
@@ -49,17 +55,18 @@ router.post('/', verifyCustomerToken, async (req, res) => {
       return res.status(400).json({ error: 'Address is required.' });
     }
 
+    // If marked as default, reset other addresses for this user
     if (is_default) {
       await pool.query(`UPDATE addresses SET is_default = false WHERE user_id = $1`, [userId]);
     }
 
     const query = `
-      INSERT INTO addresses (user_id, full_address, latitude, longitude, place_id, label, city, pincode, phone, is_default)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, '000000', '0000000000', $8)
-      RETURNING id, user_id AS customer_id, full_address AS address, latitude, longitude, place_id, label AS tag, city, is_default;
+      INSERT INTO addresses (user_id, full_address, house_no, city, pincode, phone, latitude, longitude, place_id, label, is_default)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING id, user_id AS customer_id, full_address AS address, house_no, city, pincode, phone, latitude, longitude, place_id, label AS tag, is_default;
     `;
 
-    const values = [userId, address, latitude, longitude, place_id, tag, city, is_default];
+    const values = [userId, address, house_no, city, pincode, phone, latitude, longitude, place_id, tag, is_default];
     const newAddress = await pool.query(query, values);
 
     res.status(201).json(newAddress.rows[0]);
