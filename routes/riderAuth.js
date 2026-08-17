@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
-const pool = require('../db'); // Adjust path if db.js is elsewhere
+const { pool } = require('../db'); // Adjust path if db.js is elsewhere
 
 // ---------------- REGISTER ----------------
 router.post('/register', async (req, res) => {
