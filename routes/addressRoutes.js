@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db'); // Adjust path to your db pool file
+const {pool} = require('../db'); // Adjust path to your db pool file
 const { verifyCustomerToken } = require('../middleware/authMiddleware'); // Adjust path to auth middleware
 
 // 1. GET ALL SAVED ADDRESSES FOR LOGGED-IN USER
