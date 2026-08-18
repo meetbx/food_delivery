@@ -673,6 +673,8 @@ app.post('/api/orders', async (req, res) => {
         }
       }
     }
+    console.log(`📍 Restaurant Coords: Lat ${restLat}, Lng ${restLng}`);
+console.log(`📍 Driver Search Coords: Lng ${restLng}, Lat ${restLat}`);
 
     // -------------------------------------------------------------
     // 6. REDIS GEO & REAL-TIME SOCKET DISPATCH TO RIDERS
