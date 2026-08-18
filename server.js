@@ -525,6 +525,7 @@ app.put('/api/menu-items/:id', async (req, res) => {
 // -------------------------------------------------------------
 
 // POST /api/orders (Place Order Endpoint)
+// POST /api/orders (Place Order Endpoint)
 app.post('/api/orders', async (req, res) => {
   try {
     const {
@@ -551,13 +552,22 @@ app.post('/api/orders', async (req, res) => {
     const activeUserId = user_id || userId || null;
 
     // 2. Resolve Address ID (accepts address_id, addressId, or selectedAddressId)
-    const activeAddressId = address_id || addressId || selectedAddressId || null;
+    const rawAddressId = address_id || addressId || selectedAddressId || null;
+    
+    // Safely parse address ID to avoid PostgreSQL 32-bit integer overflow (Error 22003) from Date.now() timestamps
+    let activeAddressId = null;
+    if (rawAddressId) {
+      const parsedAddr = parseInt(rawAddressId, 10);
+      if (!isNaN(parsedAddr) && parsedAddr > 0 && parsedAddr <= 2147483647) {
+        activeAddressId = parsedAddr;
+      }
+    }
 
     let fetchedAddress = null;
     let fetchedLat = null;
     let fetchedLng = null;
 
-    // 3. Fetch address details from DB if address_id exists
+    // 3. Fetch address details from DB if valid address_id exists
     if (activeAddressId) {
       try {
         const addressRes = await pool.query(
@@ -573,7 +583,7 @@ app.post('/api/orders', async (req, res) => {
         console.warn('⚠️ Could not fetch details from addresses table:', addrErr.message);
       }
     } 
-    // Fallback: If no address_id was sent, attempt to fetch the user's default address using activeUserId
+    // Fallback: If no valid address_id, fetch user's default address
     else if (activeUserId) {
       try {
         const defaultAddrRes = await pool.query(
@@ -665,10 +675,11 @@ app.post('/api/orders', async (req, res) => {
     }
 
     // -------------------------------------------------------------
-    // 6. REDIS GEO: Fetch Restaurant Coordinates & Query 3km Radius
+    // 6. REDIS GEO & REAL-TIME SOCKET DISPATCH TO RIDERS
     // -------------------------------------------------------------
     let nearbyDrivers = [];
     let restaurantLocation = null;
+    let restaurantName = 'Main Kitchen';
 
     if (restaurant_id) {
       try {
@@ -680,13 +691,14 @@ app.post('/api/orders', async (req, res) => {
         if (restResult.rows.length > 0) {
           const { latitude, longitude, name } = restResult.rows[0];
           restaurantLocation = { latitude, longitude, name };
+          if (name) restaurantName = name;
 
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 300;
+            const SEARCH_RADIUS_KM = 10; // 10 km search radius
 
-            // Query Redis Geo for active drivers within 3 km of the restaurant
+            // Query Redis Geo for active drivers within range
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
           }
         }
@@ -695,7 +707,43 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
-    // 7. Return Order details along with nearby drivers found within 3km
+    // Emit live order offers to Rider Dashboard via WebSockets
+    try {
+      const io = getIo();
+      if (io) {
+        const orderOfferPayload = {
+          orderId: newOrder.id,
+          id: newOrder.id,
+          restaurant: restaurantName,
+          restaurantAddress: restaurantLocation ? `${restaurantName} Branch` : 'Main Kitchen Location',
+          deliveryAddress: newOrder.delivery_address || 'Customer Location',
+          earnings: `₹${Math.round(calcTotal * 0.2) || 65}`,
+          pickupDistance: '1.2 km',
+          dropDistance: '3.5 km',
+          itemsCount: Array.isArray(rawItems) ? rawItems.length : 1,
+          lat: fetchedLat,
+          lng: fetchedLng
+        };
+
+        if (nearbyDrivers && nearbyDrivers.length > 0) {
+          console.log(`📡 Emitting offer to ${nearbyDrivers.length} nearby drivers in Redis.`);
+          nearbyDrivers.forEach((driverId) => {
+            const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
+            io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('new_order_offer', orderOfferPayload);
+            io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('new_delivery_assignment', orderOfferPayload);
+          });
+        } else {
+          // Fallback: If Redis returns 0 nearby drivers, broadcast to ALL connected online riders
+          console.log('📡 No specific nearby driver found in Redis. Broadcasting order offer to ALL active riders.');
+          io.emit('new_order_offer', orderOfferPayload);
+          io.emit('new_delivery_assignment', orderOfferPayload);
+        }
+      }
+    } catch (socketErr) {
+      console.error('⚠️ Socket dispatch error:', socketErr.message);
+    }
+
+    // 7. Return Order details
     res.status(201).json({
       message: 'Order placed successfully!',
       order_id: newOrder.id,
@@ -703,9 +751,9 @@ app.post('/api/orders', async (req, res) => {
       order: newOrder,
       dispatch: {
         restaurant: restaurantLocation,
-        searchRadiusKm: 3,
+        searchRadiusKm: 10,
         driversFoundCount: nearbyDrivers.length,
-        nearbyDrivers // Array of nearby drivers sorted by distance
+        nearbyDrivers
       }
     });
 
