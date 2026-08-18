@@ -97,16 +97,22 @@ app.get('/api/restaurants', async (req, res) => {
     let userLng = null;
 
     // 1. Fetch lat/lng from addresses table FIRST if address_id is provided
-    if (address_id) {
-      const addressRes = await pool.query(
-        'SELECT latitude, longitude, city FROM addresses WHERE id = $1',
-        [address_id]
-      );
-      if (addressRes.rows.length > 0) {
-        const { latitude, longitude } = addressRes.rows[0];
-        if (latitude !== null && longitude !== null && !isNaN(parseFloat(latitude)) && !isNaN(parseFloat(longitude))) {
-          userLat = parseFloat(latitude);
-          userLng = parseFloat(longitude);
+if (address_id) {
+      const parsedId = parseInt(address_id, 10);
+
+      // Validate that address_id is a valid number within PostgreSQL standard INTEGER range
+      // (1 to 2,147,483,647). This prevents 13-digit Date.now() timestamps from crashing PG error 22003.
+      if (!isNaN(parsedId) && parsedId > 0 && parsedId <= 2147483647) {
+        const addressRes = await pool.query(
+          'SELECT latitude, longitude, city FROM addresses WHERE id = $1',
+          [parsedId]
+        );
+        if (addressRes.rows.length > 0) {
+          const { latitude, longitude } = addressRes.rows[0];
+          if (latitude !== null && longitude !== null && !isNaN(parseFloat(latitude)) && !isNaN(parseFloat(longitude))) {
+            userLat = parseFloat(latitude);
+            userLng = parseFloat(longitude);
+          }
         }
       }
     }
