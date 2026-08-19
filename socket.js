@@ -72,13 +72,11 @@ const initSocket = (server) => {
         // Keep socket association active
         activeDriverSockets.set(cleanId, socket.id);
 
-        try {
-          // Sync both key formats in Redis Geo
-          await updateDriverLocation(`driver_${cleanId}`, longitude, latitude);
-          await updateDriverLocation(`rider_${cleanId}`, longitude, latitude);
-        } catch (err) {
-          console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
-        }
+try {
+  await updateDriverLocation(`driver_${cleanId}`, longitude, latitude);
+} catch (err) {
+  console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
+}
 
         // Emit location updates to the order room if active
         if (orderId) {
