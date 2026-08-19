@@ -77,24 +77,32 @@ const initSocket = (server) => {
         }
       }
 
-      // Broadcast live coordinates to all clients listening in order_<orderId>
-if (orderId) {
-    io.to(`order_${orderId}`).emit('rider_location_updated', {
-      orderId,
+const rawDriverId = data.driverId || data.riderId || currentDriverId; 
+
+if (rawDriverId) {
+  // 2. Define cleanId safely
+  const cleanId = String(rawDriverId).replace(/^(driver_|rider_)/, '');
+
+  // 3. Emit location updates
+  if (data.orderId) {
+    io.to(`order_${data.orderId}`).emit('rider_location_updated', {
+      orderId: data.orderId,
       driverId: cleanId,
-      lat: latitude,
-      lng: longitude,
-      heading: heading || 0,
+      lat: data.lat || data.latitude,
+      lng: data.lng || data.longitude,
+      heading: data.heading || 0,
       timestamp: Date.now()
     });
   }
-      // Also emit directly to the rider's room as a backup channel
+
+  // Broadcast to rider's specific rooms
   io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('driver_location_changed', {
     driverId: cleanId,
-    lat: latitude,
-    lng: longitude,
-    heading: heading || 0
+    lat: data.lat || data.latitude,
+    lng: data.lng || data.longitude,
+    heading: data.heading || 0
   });
+}
     });
 
     // 4. Express Rider Offline status explicitly
