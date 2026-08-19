@@ -1114,15 +1114,11 @@ app.get('/api/orders/pending-offers', async (req, res) => {
     const activeDriverId = driverId || riderId;
 
     if (!activeDriverId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Driver or Rider ID is required' 
-      });
+      return res.status(200).json({ success: true, data: null });
     }
 
     const cleanDriverId = String(activeDriverId).replace(/^(driver_|rider_)/, '');
 
-    // Query for orders with 'Pending' or 'Assigned' status for this driver
     const query = `
       SELECT o.*, COALESCE(r.name, 'Main Kitchen') AS restaurant_name, r.address AS restaurant_address
       FROM orders o
@@ -1136,11 +1132,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
     const result = await pool.query(query, [cleanDriverId]);
 
     if (result.rows.length === 0) {
-      return res.status(200).json({
-        success: true,
-        data: null,
-        message: 'No pending offers for this driver'
-      });
+      return res.status(200).json({ success: true, data: null });
     }
 
     const order = result.rows[0];
@@ -1162,7 +1154,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching pending offers:', error.message);
-    res.status(500).json({ success: false, message: 'Server error fetching pending offers' });
+    res.status(200).json({ success: true, data: null });
   }
 });
 // Start Express Server
