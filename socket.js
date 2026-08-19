@@ -42,11 +42,12 @@ const initSocket = (server) => {
       // Clean prefix if passed in raw format
       const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
 
-      // Join both room prefixes so backend emits to driver_X or rider_X always reach this socket
+      // Join global active_riders room as well as specific rider/driver rooms
+      socket.join('active_riders');
       socket.join(`driver_${cleanId}`);
       socket.join(`rider_${cleanId}`);
 
-      console.log(`📡 Socket ${socket.id} joined rooms: driver_${cleanId} & rider_${cleanId}`);
+      console.log(`📡 Socket ${socket.id} joined rooms: active_riders, driver_${cleanId} & rider_${cleanId}`);
     });
 
     // 3. Receive live coordinates from Simulator or Rider App
@@ -75,34 +76,27 @@ const initSocket = (server) => {
         } catch (err) {
           console.error(`Error updating Redis location for driver ${currentDriverId}:`, err.message);
         }
+
+        // Emit location updates to the order room if active
+        if (orderId) {
+          io.to(`order_${orderId}`).emit('rider_location_updated', {
+            orderId,
+            driverId: cleanId,
+            lat: latitude,
+            lng: longitude,
+            heading: heading || 0,
+            timestamp: Date.now()
+          });
+        }
+
+        // Broadcast location updates to driver specific rooms
+        io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('driver_location_changed', {
+          driverId: cleanId,
+          lat: latitude,
+          lng: longitude,
+          heading: heading || 0
+        });
       }
-
-const rawDriverId = data.driverId || data.riderId || currentDriverId; 
-
-if (rawDriverId) {
-  // 2. Define cleanId safely
-  const cleanId = String(rawDriverId).replace(/^(driver_|rider_)/, '');
-
-  // 3. Emit location updates
-  if (data.orderId) {
-    io.to(`order_${data.orderId}`).emit('rider_location_updated', {
-      orderId: data.orderId,
-      driverId: cleanId,
-      lat: data.lat || data.latitude,
-      lng: data.lng || data.longitude,
-      heading: data.heading || 0,
-      timestamp: Date.now()
-    });
-  }
-
-  // Broadcast to rider's specific rooms
-  io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('driver_location_changed', {
-    driverId: cleanId,
-    lat: data.lat || data.latitude,
-    lng: data.lng || data.longitude,
-    heading: data.heading || 0
-  });
-}
     });
 
     // 4. Express Rider Offline status explicitly
@@ -128,25 +122,25 @@ if (rawDriverId) {
     });
 
     // 6. Cleanup on Disconnect
-socket.on('disconnect', async () => {
-  console.log(`[Socket Disconnected]: ${socket.id}`);
+    socket.on('disconnect', async () => {
+      console.log(`[Socket Disconnected]: ${socket.id}`);
 
-  if (currentDriverId) {
-    const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+      if (currentDriverId) {
+        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
 
-    // Grace period: Wait 5 seconds before removing from Redis
-    // If the rider re-connects within 5s (page refresh/DevTools toggle), they stay indexed
-    setTimeout(async () => {
-      try {
-        await removeDriverLocation(`driver_${cleanId}`);
-        await removeDriverLocation(`rider_${cleanId}`);
-        console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
-      } catch (err) {
-        console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+        // Grace period: Wait 5 seconds before removing from Redis
+        // If the rider re-connects within 5s, they stay indexed
+        setTimeout(async () => {
+          try {
+            await removeDriverLocation(`driver_${cleanId}`);
+            await removeDriverLocation(`rider_${cleanId}`);
+            console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
+          } catch (err) {
+            console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+          }
+        }, 5000);
       }
-    }, 5000);
-  }
-});
+    });
   });
 
   return io;
