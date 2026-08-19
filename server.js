@@ -696,7 +696,7 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 10; // 10 km search radius
+            const SEARCH_RADIUS_KM = 100; // 10 km search radius
 
             // Query Redis Geo for active drivers within range
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
