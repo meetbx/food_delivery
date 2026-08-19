@@ -736,8 +736,8 @@ app.post('/api/orders', async (req, res) => {
         } else {
           // Fallback: If Redis returns 0 nearby drivers, broadcast to ALL connected online riders
           console.log('📡 No specific nearby driver found in Redis. Broadcasting order offer to ALL active riders.');
-          io.emit('new_order_offer', orderOfferPayload);
-          io.emit('new_delivery_assignment', orderOfferPayload);
+         // io.emit('new_order_offer', orderOfferPayload);
+         // io.emit('new_delivery_assignment', orderOfferPayload);
         }
       }
     } catch (socketErr) {
