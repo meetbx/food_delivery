@@ -128,21 +128,25 @@ if (rawDriverId) {
     });
 
     // 6. Cleanup on Disconnect
-    socket.on('disconnect', async () => {
-      console.log(`[Socket Disconnected]: ${socket.id}`);
-      
-      // Optionally purge location from Redis if socket drops abruptly
-      if (currentDriverId) {
-        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
-        try {
-          await removeDriverLocation(`driver_${cleanId}`);
-          await removeDriverLocation(`rider_${cleanId}`);
-          console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
-        } catch (err) {
-          console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
-        }
+socket.on('disconnect', async () => {
+  console.log(`[Socket Disconnected]: ${socket.id}`);
+
+  if (currentDriverId) {
+    const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+
+    // Grace period: Wait 5 seconds before removing from Redis
+    // If the rider re-connects within 5s (page refresh/DevTools toggle), they stay indexed
+    setTimeout(async () => {
+      try {
+        await removeDriverLocation(`driver_${cleanId}`);
+        await removeDriverLocation(`rider_${cleanId}`);
+        console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
+      } catch (err) {
+        console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
       }
-    });
+    }, 5000);
+  }
+});
   });
 
   return io;
