@@ -919,7 +919,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
              r.longitude AS restaurant_longitude
       FROM orders o
       LEFT JOIN restaurants r ON o.restaurant_id = r.id
-      WHERE (o.driver_id = $1 OR o.status = 'Pending') 
+      WHERE (o.rider_id = $1 OR o.status = 'Pending') 
         AND o.status NOT IN ('Delivered', 'Cancelled')
       ORDER BY o.id DESC;
     `;
