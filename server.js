@@ -722,7 +722,8 @@ app.post('/api/orders', async (req, res) => {
           dropDistance: '3.5 km',
           itemsCount: Array.isArray(rawItems) ? rawItems.length : 1,
           lat: fetchedLat,
-          lng: fetchedLng
+          lng: fetchedLng,
+          roomName: `order_${newOrder.id}`
         };
 
         if (nearbyDrivers && nearbyDrivers.length > 0) {
