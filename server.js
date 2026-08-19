@@ -1105,7 +1105,66 @@ app.get('/api/restaurant/:restaurantId/orders', async (req, res) => {
     res.status(500).json({ error: 'Server error fetching partner orders' });
   }
 });
+// -------------------------------------------------------------
+// GET /api/orders/pending-offers (Rider Pending Offer Query)
+// -------------------------------------------------------------
+app.get('/api/orders/pending-offers', async (req, res) => {
+  try {
+    const { driverId, riderId } = req.query;
+    const activeDriverId = driverId || riderId;
 
+    if (!activeDriverId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Driver or Rider ID is required' 
+      });
+    }
+
+    const cleanDriverId = String(activeDriverId).replace(/^(driver_|rider_)/, '');
+
+    // Query for orders with 'Pending' or 'Assigned' status for this driver
+    const query = `
+      SELECT o.*, COALESCE(r.name, 'Main Kitchen') AS restaurant_name, r.address AS restaurant_address
+      FROM orders o
+      LEFT JOIN restaurants r ON o.restaurant_id = r.id
+      WHERE (o.driver_id = $1 OR o.status = 'Pending') 
+        AND o.status NOT IN ('Delivered', 'Cancelled')
+      ORDER BY o.id DESC
+      LIMIT 1;
+    `;
+
+    const result = await pool.query(query, [cleanDriverId]);
+
+    if (result.rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        message: 'No pending offers for this driver'
+      });
+    }
+
+    const order = result.rows[0];
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orderId: order.id,
+        id: order.id,
+        restaurant: order.restaurant_name,
+        restaurantAddress: order.restaurant_address || 'Main Kitchen Location',
+        deliveryAddress: order.delivery_address || 'Customer Location',
+        earnings: `₹${Math.round((order.final_total || 0) * 0.2) || 65}`,
+        pickupDistance: '1.2 km',
+        dropDistance: '3.5 km',
+        lat: order.delivery_latitude,
+        lng: order.delivery_longitude
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching pending offers:', error.message);
+    res.status(500).json({ success: false, message: 'Server error fetching pending offers' });
+  }
+});
 // Start Express Server
 server.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
