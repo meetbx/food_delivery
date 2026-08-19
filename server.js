@@ -696,7 +696,7 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 100; // 10 km search radius
+            const SEARCH_RADIUS_KM = 10; // 10 km search radius
 
             // Query Redis Geo for active drivers within range
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
@@ -1108,48 +1108,91 @@ app.get('/api/restaurant/:restaurantId/orders', async (req, res) => {
 // -------------------------------------------------------------
 // GET /api/orders/pending-offers (Rider Pending Offer Query)
 // -------------------------------------------------------------
+// GET /api/orders/pending-offers (Rider Pending Offer Query with Distance Filter)
 app.get('/api/orders/pending-offers', async (req, res) => {
   try {
-    const { driverId, riderId } = req.query;
+    const { driverId, riderId, lat, lng } = req.query;
     const activeDriverId = driverId || riderId;
 
     if (!activeDriverId) {
       return res.status(200).json({ success: true, data: null });
     }
 
-    const cleanDriverId = String(activeDriverId).replace(/^(driver_|rider_)/, '');
+    const cleanDriverId = parseInt(String(activeDriverId).replace(/^(driver_|rider_)/, ''), 10);
+    const validDriverId = isNaN(cleanDriverId) ? null : cleanDriverId;
 
+    // Fetch active unassigned/pending orders along with restaurant coordinates
     const query = `
-      SELECT o.*, COALESCE(r.name, 'Main Kitchen') AS restaurant_name, r.address AS restaurant_address
+      SELECT o.*, 
+             COALESCE(r.name, 'Main Kitchen') AS restaurant_name, 
+             r.address AS restaurant_address,
+             r.latitude AS restaurant_latitude,
+             r.longitude AS restaurant_longitude
       FROM orders o
       LEFT JOIN restaurants r ON o.restaurant_id = r.id
       WHERE (o.driver_id = $1 OR o.status = 'Pending') 
         AND o.status NOT IN ('Delivered', 'Cancelled')
-      ORDER BY o.id DESC
-      LIMIT 1;
+      ORDER BY o.id DESC;
     `;
 
-    const result = await pool.query(query, [cleanDriverId]);
+    const result = await pool.query(query, [validDriverId]);
 
     if (result.rows.length === 0) {
       return res.status(200).json({ success: true, data: null });
     }
 
-    const order = result.rows[0];
+    // Radius Filter: Max 15 km from restaurant
+    const MAX_RADIUS_KM = 15;
+    const driverLat = parseFloat(lat);
+    const driverLng = parseFloat(lng);
+
+    let matchingOrder = null;
+
+    for (const order of result.rows) {
+      const restLat = parseFloat(order.restaurant_latitude);
+      const restLng = parseFloat(order.restaurant_longitude);
+
+      // If driver coordinates & restaurant coordinates exist, calculate distance
+      if (!isNaN(driverLat) && !isNaN(driverLng) && !isNaN(restLat) && !isNaN(restLng)) {
+        // Haversine formula distance calculation
+        const R = 6371; // Earth radius in km
+        const dLat = (restLat - driverLat) * (Math.PI / 180);
+        const dLng = (restLng - driverLng) * (Math.PI / 180);
+        const a = 
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(driverLat * (Math.PI / 180)) * Math.cos(restLat * (Math.PI / 180)) * 
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const distanceKm = R * c;
+
+        if (distanceKm <= MAX_RADIUS_KM) {
+          matchingOrder = { ...order, distanceKm: distanceKm.toFixed(1) };
+          break;
+        }
+      } else {
+        // Fallback: If coordinates aren't supplied, return the latest pending order
+        matchingOrder = order;
+        break;
+      }
+    }
+
+    if (!matchingOrder) {
+      return res.status(200).json({ success: true, data: null });
+    }
 
     return res.status(200).json({
       success: true,
       data: {
-        orderId: order.id,
-        id: order.id,
-        restaurant: order.restaurant_name,
-        restaurantAddress: order.restaurant_address || 'Main Kitchen Location',
-        deliveryAddress: order.delivery_address || 'Customer Location',
-        earnings: `₹${Math.round((order.final_total || 0) * 0.2) || 65}`,
-        pickupDistance: '1.2 km',
+        orderId: matchingOrder.id,
+        id: matchingOrder.id,
+        restaurant: matchingOrder.restaurant_name,
+        restaurantAddress: matchingOrder.restaurant_address || 'Main Kitchen Location',
+        deliveryAddress: matchingOrder.delivery_address || 'Customer Location',
+        earnings: `₹${Math.round((matchingOrder.final_total || 0) * 0.2) || 65}`,
+        pickupDistance: matchingOrder.distanceKm ? `${matchingOrder.distanceKm} km` : '1.2 km',
         dropDistance: '3.5 km',
-        lat: order.delivery_latitude,
-        lng: order.delivery_longitude
+        lat: matchingOrder.delivery_latitude,
+        lng: matchingOrder.delivery_longitude
       }
     });
   } catch (error) {
