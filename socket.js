@@ -6,6 +6,9 @@ const {
 
 let io;
 
+// Active tracking map: driverId -> current socket.id
+const activeDriverSockets = new Map();
+
 /**
  * Initializes Socket.IO on the HTTP server
  * @param {Object} server - Node.js HTTP Server instance
@@ -37,17 +40,18 @@ const initSocket = (server) => {
       const activeId = riderId || driverId;
       if (!activeId) return;
 
-      currentDriverId = activeId;
-      
-      // Clean prefix if passed in raw format
       const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+      currentDriverId = cleanId;
+
+      // Associate driver ID with current active socket ID
+      activeDriverSockets.set(cleanId, socket.id);
 
       // Join global active_riders room as well as specific rider/driver rooms
       socket.join('active_riders');
       socket.join(`driver_${cleanId}`);
       socket.join(`rider_${cleanId}`);
 
-      console.log(`📡 Socket ${socket.id} joined rooms: active_riders, driver_${cleanId} & rider_${cleanId}`);
+      console.log(`📡 Socket ${socket.id} registered for driver ${cleanId}`);
     });
 
     // 3. Receive live coordinates from Simulator or Rider App
@@ -60,21 +64,20 @@ const initSocket = (server) => {
 
       if (isNaN(latitude) || isNaN(longitude)) return;
 
-      // Track current driver associated with this socket instance
       const targetDriverId = driverId || riderId || currentDriverId;
       if (targetDriverId) {
-        currentDriverId = targetDriverId;
-      }
+        const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
+        currentDriverId = cleanId;
 
-      // Update spatial index in Redis Geo (Longitude, Latitude)
-      if (currentDriverId) {
-        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+        // Keep socket association active
+        activeDriverSockets.set(cleanId, socket.id);
+
         try {
           // Sync both key formats in Redis Geo
           await updateDriverLocation(`driver_${cleanId}`, longitude, latitude);
           await updateDriverLocation(`rider_${cleanId}`, longitude, latitude);
         } catch (err) {
-          console.error(`Error updating Redis location for driver ${currentDriverId}:`, err.message);
+          console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
         }
 
         // Emit location updates to the order room if active
@@ -104,6 +107,7 @@ const initSocket = (server) => {
       const idToRemove = driverId || riderId || currentDriverId;
       if (idToRemove) {
         const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
+        activeDriverSockets.delete(cleanId);
         try {
           await removeDriverLocation(`driver_${cleanId}`);
           await removeDriverLocation(`rider_${cleanId}`);
@@ -121,22 +125,28 @@ const initSocket = (server) => {
       console.log(`Socket ${socket.id} left room ${roomName}`);
     });
 
-    // 6. Cleanup on Disconnect
+    // 6. Cleanup on Disconnect (Safe Grace Period)
     socket.on('disconnect', async () => {
       console.log(`[Socket Disconnected]: ${socket.id}`);
 
       if (currentDriverId) {
         const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+        const disconnectedSocketId = socket.id;
 
         // Grace period: Wait 5 seconds before removing from Redis
-        // If the rider re-connects within 5s, they stay indexed
         setTimeout(async () => {
-          try {
-            await removeDriverLocation(`driver_${cleanId}`);
-            await removeDriverLocation(`rider_${cleanId}`);
-            console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
-          } catch (err) {
-            console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+          // CRITICAL FIX: Only remove if driver HAS NOT reconnected with a new socket
+          if (activeDriverSockets.get(cleanId) === disconnectedSocketId) {
+            activeDriverSockets.delete(cleanId);
+            try {
+              await removeDriverLocation(`driver_${cleanId}`);
+              await removeDriverLocation(`rider_${cleanId}`);
+              console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
+            } catch (err) {
+              console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+            }
+          } else {
+            console.log(`Driver ${cleanId} reconnected on a new socket. Preserved in Redis.`);
           }
         }, 5000);
       }
