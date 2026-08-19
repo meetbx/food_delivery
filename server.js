@@ -726,26 +726,24 @@ app.post('/api/orders', async (req, res) => {
           roomName: `order_${newOrder.id}`
         };
 
-if (nearbyDrivers && nearbyDrivers.length > 0) {
-          console.log(`📡 Emitting offer to ${nearbyDrivers.length} nearby drivers in Redis.`);
-          nearbyDrivers.forEach((driverId) => {
-            const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
-            io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('new_order_offer', orderOfferPayload);
-            io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('new_delivery_assignment', orderOfferPayload);
-          });
-          
-          // Fallback broadcast so riders whose sockets reconnected also receive the offer:
-          io.emit('new_order_offer', orderOfferPayload);
-        } else {
-          // Fallback: If Redis returns 0 nearby drivers, broadcast to ALL connected online riders
-          console.log('📡 No specific nearby driver found in Redis. Broadcasting order offer to ALL active riders.');
-          io.emit('new_order_offer', orderOfferPayload);
-          io.emit('new_delivery_assignment', orderOfferPayload);
-        }
-      }
-    } catch (socketErr) {
-      console.error('⚠️ Socket dispatch error:', socketErr.message);
-    }
+try {
+  if (nearbyDrivers && nearbyDrivers.length > 0) {
+    console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers.`);
+    
+    nearbyDrivers.forEach((driverId) => {
+      const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
+      
+      // Target specific rider and driver rooms only
+      io.to(`rider_${cleanId}`)
+        .to(`driver_${cleanId}`)
+        .emit('new_order_offer', orderOfferPayload);
+    });
+  } else {
+    console.log('⚠️ No specific drivers found in geo-radius. Skipping broadcast to prevent socket room cross-talk.');
+  }
+} catch (socketErr) {
+  console.error('⚠️ Socket dispatch error:', socketErr.message);
+}
 
     // 7. Return Order details
     res.status(201).json({
