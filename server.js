@@ -751,7 +751,7 @@ app.post('/api/orders', async (req, res) => {
       order: newOrder,
       dispatch: {
         restaurant: restaurantLocation,
-        searchRadiusKm: 10,
+        searchRadiusKm: 100,
         driversFoundCount: nearbyDrivers.length,
         nearbyDrivers
       }
