@@ -3,7 +3,9 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const { pool } = require('../db'); // Adjust path if db.js is elsewhere
 const jwt = require('jsonwebtoken');
+
 const JWT_SECRET = process.env.JWT_SECRET || '4a89f2c38b1e8f9076543210abcd1234ef567890abcdef1234567890abcdef12';
+
 // ---------------- REGISTER ----------------
 router.post('/register', async (req, res) => {
   try {
@@ -31,10 +33,17 @@ router.post('/register', async (req, res) => {
 
     const rider = newRider.rows[0];
 
+    // Generate JWT token on registration as well
+    const token = jwt.sign(
+      { id: rider.id, phone: rider.phone, name: rider.name },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
     res.status(201).json({
       message: 'Registration successful!',
       rider,
-      token: 'jwt-token-placeholder', // You can integrate JWT here later
+      token,
     });
   } catch (err) {
     console.error('Registration Error:', err.message);
@@ -46,11 +55,6 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
-    const token = jwt.sign(
-  { id: rider.id, phone: rider.phone, name: rider.name },
-  JWT_SECRET,
-  { expiresIn: '7d' }
-);
 
     // 1. Find rider by phone number
     const result = await pool.query(
@@ -71,7 +75,14 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid phone number or password.' });
     }
 
-    // 3. Password matched successfully
+    // 3. Generate token AFTER rider is found and password is verified
+    const token = jwt.sign(
+      { id: rider.id, phone: rider.phone, name: rider.name },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // 4. Return success response
     res.json({
       message: 'Login successful!',
       rider: {
