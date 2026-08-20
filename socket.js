@@ -73,7 +73,7 @@ const initSocket = (server) => {
         activeDriverSockets.set(cleanId, socket.id);
 
 try {
-  await updateDriverLocation(`driver_${cleanId}`, longitude, latitude);
+  await updateDriverLocation(cleanId, longitude, latitude);
 } catch (err) {
   console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
 }
@@ -107,8 +107,7 @@ try {
         const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
         activeDriverSockets.delete(cleanId);
         try {
-          await removeDriverLocation(`driver_${cleanId}`);
-          await removeDriverLocation(`rider_${cleanId}`);
+                  await removeDriverLocation(cleanId);
           console.log(`Driver ${cleanId} marked offline in Redis`);
         } catch (err) {
           console.error(`Error removing driver ${cleanId} from Redis:`, err.message);
@@ -137,8 +136,7 @@ try {
           if (activeDriverSockets.get(cleanId) === disconnectedSocketId) {
             activeDriverSockets.delete(cleanId);
             try {
-              await removeDriverLocation(`driver_${cleanId}`);
-              await removeDriverLocation(`rider_${cleanId}`);
+      await removeDriverLocation(cleanId);
               console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
             } catch (err) {
               console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
