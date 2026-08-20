@@ -674,9 +674,7 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
-    // -------------------------------------------------------------
     // 6. REDIS GEO & REAL-TIME SOCKET DISPATCH TO RIDERS
-    // -------------------------------------------------------------
     let nearbyDrivers = [];
     let restaurantLocation = null;
     let restaurantName = 'Main Kitchen';
@@ -696,9 +694,8 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 10; // 10 km search radius
+            const SEARCH_RADIUS_KM = 10;
 
-            // Query Redis Geo for active drivers within range
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
           }
         }
@@ -726,24 +723,21 @@ app.post('/api/orders', async (req, res) => {
           roomName: `order_${newOrder.id}`
         };
 
-try {
-  if (nearbyDrivers && nearbyDrivers.length > 0) {
-    console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers.`);
-    
-    nearbyDrivers.forEach((driverId) => {
-      const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
-      
-      // Target specific rider and driver rooms only
-      io.to(`rider_${cleanId}`)
-        .to(`driver_${cleanId}`)
-        .emit('new_order_offer', orderOfferPayload);
-    });
-  } else {
-    console.log('⚠️ No specific drivers found in geo-radius. Skipping broadcast to prevent socket room cross-talk.');
-  }
-} catch (socketErr) {
-  console.error('⚠️ Socket dispatch error:', socketErr.message);
-}
+        if (nearbyDrivers && nearbyDrivers.length > 0) {
+          console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers.`);
+          nearbyDrivers.forEach((driverId) => {
+            const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
+            io.to(`rider_${cleanId}`)
+              .to(`driver_${cleanId}`)
+              .emit('new_order_offer', orderOfferPayload);
+          });
+        } else {
+          console.log('⚠️ No specific drivers found in geo-radius.');
+        }
+      }
+    } catch (socketErr) {
+      console.error('⚠️ Socket dispatch error:', socketErr.message);
+    }
 
     // 7. Return Order details
     res.status(201).json({
@@ -753,7 +747,7 @@ try {
       order: newOrder,
       dispatch: {
         restaurant: restaurantLocation,
-        searchRadiusKm: 100,
+        searchRadiusKm: 10,
         driversFoundCount: nearbyDrivers.length,
         nearbyDrivers
       }
