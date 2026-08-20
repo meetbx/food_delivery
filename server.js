@@ -736,7 +736,7 @@ app.post('/api/orders', async (req, res) => {
           });
 
           // Fallback broadcast to ensure all online drivers receive the offer
-          io.to('active_riders').emit('new_order_offer', orderOfferPayload);
+        //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
         }
