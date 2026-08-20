@@ -705,6 +705,7 @@ app.post('/api/orders', async (req, res) => {
     }
 
     // Emit live order offers to Rider Dashboard via WebSockets
+// Emit live order offers to Rider Dashboard via WebSockets
     try {
       const io = getIo();
       if (io) {
@@ -724,13 +725,18 @@ app.post('/api/orders', async (req, res) => {
         };
 
         if (nearbyDrivers && nearbyDrivers.length > 0) {
-          console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers.`);
+          console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
+
           nearbyDrivers.forEach((driverId) => {
             const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
-            io.to(`rider_${cleanId}`)
-              .to(`driver_${cleanId}`)
-              .emit('new_order_offer', orderOfferPayload);
+
+            // Emit to driver room, rider room, and global active_riders separately
+            io.to(`driver_${cleanId}`).emit('new_order_offer', orderOfferPayload);
+            io.to(`rider_${cleanId}`).emit('new_order_offer', orderOfferPayload);
           });
+
+          // Fallback broadcast to ensure all online drivers receive the offer
+          io.to('active_riders').emit('new_order_offer', orderOfferPayload);
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
         }
