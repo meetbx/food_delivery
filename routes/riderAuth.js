@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const { pool } = require('../db'); // Adjust path if db.js is elsewhere
-
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || '4a89f2c38b1e8f9076543210abcd1234ef567890abcdef1234567890abcdef12';
 // ---------------- REGISTER ----------------
 router.post('/register', async (req, res) => {
   try {
@@ -45,6 +46,11 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
+    const token = jwt.sign(
+  { id: rider.id, phone: rider.phone, name: rider.name },
+  JWT_SECRET,
+  { expiresIn: '7d' }
+);
 
     // 1. Find rider by phone number
     const result = await pool.query(
@@ -73,7 +79,7 @@ router.post('/login', async (req, res) => {
         name: rider.name,
         phone: rider.phone,
       },
-      token: 'jwt-token-placeholder',
+      token,
     });
   } catch (err) {
     console.error('Login Error:', err.message);
