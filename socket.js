@@ -36,6 +36,7 @@ const initSocket = (server) => {
     });
 
     // 2. Register Rider / Driver into personal notification rooms
+   // 2. Register Rider / Driver into personal notification rooms
     socket.on('register_rider', ({ riderId, driverId }) => {
       const activeId = riderId || driverId;
       if (!activeId) return;
