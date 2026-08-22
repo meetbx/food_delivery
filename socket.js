@@ -52,10 +52,11 @@ const initSocket = (server) => {
       socket.join(`driver_${cleanId}`);
       socket.join(`rider_${cleanId}`);
 
-      console.log(`📡 Socket ${socket.id} registered for driver ${cleanId}`);
+      console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+  console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
     });
 
-    // 3. Receive live coordinates from Simulator or Rider App
+/*    // 3. Receive live coordinates from Simulator or Rider App
     socket.on('send_rider_location', async (data) => {
       const { orderId, driverId, riderId, lat, lng, heading } = data;
       if (lat == null || lng == null) return;
@@ -78,7 +79,21 @@ try {
 } catch (err) {
   console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
 }
+*/
+    socket.on('send_rider_location', async (data) => {
+  const { driverId, riderId, lat, lng } = data;
+  const targetDriverId = driverId || riderId || currentDriverId;
+  const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
 
+  console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
+
+  try {
+    await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
+    console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
+  } catch (err) {
+    console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
+  }
+});
         // Emit location updates to the order room if active
         if (orderId) {
           io.to(`order_${orderId}`).emit('rider_location_updated', {
