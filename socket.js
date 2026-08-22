@@ -36,51 +36,25 @@ const initSocket = (server) => {
     });
 
     // 2. Register Rider / Driver into personal notification rooms
-   // 2. Register Rider / Driver into personal notification rooms
-    socket.on('register_rider', ({ riderId, driverId }) => {
-      const activeId = riderId || driverId;
-      if (!activeId) return;
+   socket.on('register_rider', ({ riderId, driverId }) => {
+  const activeId = riderId || driverId;
+  if (!activeId) return;
 
-      const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
-      currentDriverId = cleanId;
+  const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+  currentDriverId = cleanId;
 
-      // Associate driver ID with current active socket ID
-      activeDriverSockets.set(cleanId, socket.id);
+  activeDriverSockets.set(cleanId, socket.id);
 
-      // Join global active_riders room as well as specific rider/driver rooms
-      socket.join('active_riders');
-      socket.join(`driver_${cleanId}`);
-      socket.join(`rider_${cleanId}`);
+  socket.join('active_riders');
+  socket.join(`driver_${cleanId}`);
+  socket.join(`rider_${cleanId}`);
 
-      console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+  console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
   console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
-    });
+});
 
-/*    // 3. Receive live coordinates from Simulator or Rider App
-    socket.on('send_rider_location', async (data) => {
-      const { orderId, driverId, riderId, lat, lng, heading } = data;
-      if (lat == null || lng == null) return;
-
-      const latitude = parseFloat(lat);
-      const longitude = parseFloat(lng);
-
-      if (isNaN(latitude) || isNaN(longitude)) return;
-
-      const targetDriverId = driverId || riderId || currentDriverId;
-      if (targetDriverId) {
-        const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
-        currentDriverId = cleanId;
-
-        // Keep socket association active
-        activeDriverSockets.set(cleanId, socket.id);
-
-try {
-  await updateDriverLocation(cleanId, longitude, latitude);
-} catch (err) {
-  console.error(`Error updating Redis location for driver ${cleanId}:`, err.message);
-}
-*/
-    socket.on('send_rider_location', async (data) => {
+    // 3. Receive live coordinates from Simulator or Rider App
+socket.on('send_rider_location', async (data) => {
   const { driverId, riderId, lat, lng } = data;
   const targetDriverId = driverId || riderId || currentDriverId;
   const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
@@ -93,7 +67,8 @@ try {
   } catch (err) {
     console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
   }
-});
+
+
         // Emit location updates to the order room if active
         if (orderId) {
           io.to(`order_${orderId}`).emit('rider_location_updated', {
@@ -123,7 +98,8 @@ try {
         const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
         activeDriverSockets.delete(cleanId);
         try {
-                  await removeDriverLocation(cleanId);
+          await removeDriverLocation(`driver_${cleanId}`);
+          await removeDriverLocation(`rider_${cleanId}`);
           console.log(`Driver ${cleanId} marked offline in Redis`);
         } catch (err) {
           console.error(`Error removing driver ${cleanId} from Redis:`, err.message);
@@ -152,7 +128,8 @@ try {
           if (activeDriverSockets.get(cleanId) === disconnectedSocketId) {
             activeDriverSockets.delete(cleanId);
             try {
-      await removeDriverLocation(cleanId);
+              await removeDriverLocation(`driver_${cleanId}`);
+              await removeDriverLocation(`rider_${cleanId}`);
               console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
             } catch (err) {
               console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
