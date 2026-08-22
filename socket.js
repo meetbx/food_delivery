@@ -67,28 +67,6 @@ socket.on('send_rider_location', async (data) => {
   } catch (err) {
     console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
   }
-
-
-        // Emit location updates to the order room if active
-        if (orderId) {
-          io.to(`order_${orderId}`).emit('rider_location_updated', {
-            orderId,
-            driverId: cleanId,
-            lat: latitude,
-            lng: longitude,
-            heading: heading || 0,
-            timestamp: Date.now()
-          });
-        }
-
-        // Broadcast location updates to driver specific rooms
-        io.to(`rider_${cleanId}`).to(`driver_${cleanId}`).emit('driver_location_changed', {
-          driverId: cleanId,
-          lat: latitude,
-          lng: longitude,
-          heading: heading || 0
-        });
-      }
     });
 
     // 4. Express Rider Offline status explicitly
