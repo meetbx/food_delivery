@@ -724,24 +724,31 @@ app.post('/api/orders', async (req, res) => {
           roomName: `order_${newOrder.id}`
         };
 
-       /* if (nearbyDrivers && nearbyDrivers.length > 0) {
+        if (nearbyDrivers && nearbyDrivers.length > 0) {
           console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
 
-          nearbyDrivers.forEach((driverId) => {
-            const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
+nearbyDrivers.forEach((driver) => {
+  // Extract driverId if driver is an object, otherwise use driver directly
+  const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
+  const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
 
-            // Emit to driver room, rider room, and global active_riders separately
-            io.to(`driver_${cleanId}`).emit('new_order_offer', orderOfferPayload);
-            io.to(`rider_${cleanId}`).emit('new_order_offer', orderOfferPayload);
-          });
+  const driverRoom = `driver_${cleanId}`;
+  const riderRoom = `rider_${cleanId}`;
+
+  console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
+
+  // Emit to driver room and rider room individually
+  io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
+  io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
+});
 
           // Fallback broadcast to ensure all online drivers receive the offer
         //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
         }
-        */
-        console.log(`📍 [ORDER CREATED] Order ID: ${newOrder.id}`);
+        
+/*        console.log(`📍 [ORDER CREATED] Order ID: ${newOrder.id}`);
 console.log(`📍 [RESTAURANT COORDS] Lat: ${fetchedLat}, Lng: ${fetchedLng}`);
 console.log(`🔍 [REDIS SEARCH RESULT] nearbyDrivers:`, nearbyDrivers);
 
@@ -759,6 +766,8 @@ if (nearbyDrivers && nearbyDrivers.length > 0) {
 } else {
   console.log(`⚠️ [GEO FAIL] No drivers found within radius of Lat: ${fetchedLat}, Lng: ${fetchedLng}`);
 }
+        */
+
         
       }
     } catch (socketErr) {
