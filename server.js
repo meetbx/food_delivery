@@ -724,7 +724,7 @@ app.post('/api/orders', async (req, res) => {
           roomName: `order_${newOrder.id}`
         };
 
-        if (nearbyDrivers && nearbyDrivers.length > 0) {
+       /* if (nearbyDrivers && nearbyDrivers.length > 0) {
           console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
 
           nearbyDrivers.forEach((driverId) => {
@@ -740,6 +740,42 @@ app.post('/api/orders', async (req, res) => {
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
         }
+        */
+          if (nearbyDrivers && nearbyDrivers.length > 0) {
+          console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
+
+          nearbyDrivers.forEach((driverId) => {
+            const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
+            const driverRoom = `driver_${cleanId}`;
+            const riderRoom = `rider_${cleanId}`;
+
+            // Check active socket counts inside the individual rooms
+            const driverRoomAdapter = io.sockets.adapter.rooms.get(driverRoom);
+            const riderRoomAdapter = io.sockets.adapter.rooms.get(riderRoom);
+
+            const driverSocketsCount = driverRoomAdapter ? driverRoomAdapter.size : 0;
+            const riderSocketsCount = riderRoomAdapter ? riderRoomAdapter.size : 0;
+
+            console.log(`🔍 [ROOM DIAGNOSTIC] Driver ${cleanId}:`);
+            console.log(`   └─ Room '${driverRoom}' connected sockets: ${driverSocketsCount}`);
+            console.log(`   └─ Room '${riderRoom}' connected sockets: ${riderSocketsCount}`);
+
+            // Detect if chained .to().to() is failing due to zero overlapping sockets
+            if (driverSocketsCount === 0 && riderSocketsCount === 0) {
+              console.error(`❌ [EMIT ERROR] Driver ${cleanId} is in nearbyDrivers list, but has 0 connected sockets in room '${driverRoom}' or '${riderRoom}'. Offer will not deliver!`);
+            } else {
+              console.log(`🚀 [EMIT ATTEMPT] Dispatching 'new_order_offer' to driver_${cleanId} & rider_${cleanId}`);
+            }
+
+            // Your current emit implementation
+            io.to(riderRoom)
+              .to(driverRoom)
+              .emit('new_order_offer', orderOfferPayload);
+          });
+        } else {
+          console.log('⚠️ No specific drivers found in geo-radius.');
+        }
+        
       }
     } catch (socketErr) {
       console.error('⚠️ Socket dispatch error:', socketErr.message);
