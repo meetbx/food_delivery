@@ -9,7 +9,7 @@ const JWT_SECRET = process.env.JWT_SECRET || '4a89f2c38b1e8f9076543210abcd1234ef
 
 // CUSTOMER REGISTER
 router.post('/register', async (req, res) => {
-  const { name, phone, email, password, latitude, longitude, current_address } = req.body;
+  const { name, phone, email, password} = req.body;
 
   if (!name || !phone || !password) {
     return res.status(400).json({ error: 'Name, Phone number, and Password are required.' });
@@ -28,17 +28,14 @@ router.post('/register', async (req, res) => {
 
     // Insert user with location fields
     const newUser = await pool.query(
-      `INSERT INTO users (name, phone, email, password, latitude, longitude, current_address) 
+      `INSERT INTO users (name, phone, email, password) 
        VALUES ($1, $2, $3, $4, $5, $6, $7) 
-       RETURNING id, name, phone, email, latitude, longitude, current_address, created_at`,
+       RETURNING id, name, phone, email, created_at`,
       [
         name, 
         phone, 
         email || null, 
         hashedPassword, 
-        latitude || null, 
-        longitude || null, 
-        current_address || null
       ]
     );
 
@@ -97,7 +94,7 @@ router.post('/login', async (req, res) => {
 router.get('/me', verifyCustomerToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, phone, email, latitude, longitude, current_address, created_at 
+      `SELECT id, name, phone, email, created_at 
        FROM users 
        WHERE id = $1`, 
       [req.user.id]
@@ -110,30 +107,6 @@ router.get('/me', verifyCustomerToken, async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'Server error fetching user details.' });
-  }
-});
-
-// UPDATE USER LOCATION
-router.put('/location', verifyCustomerToken, async (req, res) => {
-  try {
-    const { latitude, longitude, current_address } = req.body;
-
-    const result = await pool.query(
-      `UPDATE users 
-       SET latitude = $1, longitude = $2, current_address = $3 
-       WHERE id = $4 
-       RETURNING id, name, phone, email, latitude, longitude, current_address, created_at`,
-      [latitude, longitude, current_address, req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('Location Update Error:', error);
-    res.status(500).json({ error: 'Server error updating user location.' });
   }
 });
 
