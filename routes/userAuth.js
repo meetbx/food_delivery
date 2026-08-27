@@ -29,7 +29,7 @@ router.post('/register', async (req, res) => {
     // Insert user with location fields
     const newUser = await pool.query(
       `INSERT INTO users (name, phone, email, password) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) 
+       VALUES ($1, $2, $3, $4) 
        RETURNING id, name, phone, email, created_at`,
       [
         name, 
