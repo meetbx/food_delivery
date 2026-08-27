@@ -15,10 +15,8 @@ router.get('/', verifyCustomerToken, async (req, res) => {
         house_no,
         latitude, 
         longitude, 
-        place_id, 
         label AS tag, 
         city,
-        pincode,
         phone,
         is_default 
        FROM addresses 
@@ -61,12 +59,12 @@ router.post('/', verifyCustomerToken, async (req, res) => {
     }
 
     const query = `
-      INSERT INTO addresses (user_id, full_address, house_no, city, pincode, phone, latitude, longitude, place_id, label, is_default)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING id, user_id AS customer_id, full_address AS address, house_no, city, pincode, phone, latitude, longitude, place_id, label AS tag, is_default;
+      INSERT INTO addresses (user_id, full_address, house_no, city, phone, latitude, longitude, label, is_default)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id, user_id AS customer_id, full_address AS address, house_no, city, phone, latitude, longitude, label AS tag, is_default;
     `;
 
-    const values = [userId, address, house_no, city, pincode, phone, latitude, longitude, place_id, tag, is_default];
+    const values = [userId, address, house_no, city, phone, latitude, longitude, tag, is_default];
     const newAddress = await pool.query(query, values);
 
     res.status(201).json(newAddress.rows[0]);
