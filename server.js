@@ -864,6 +864,7 @@ const getOrderDetails = async (req, res) => {
        FROM orders o 
        LEFT JOIN restaurants r ON o.restaurant_id = r.id 
        LEFT JOIN users u ON o.user_id = u.id
+       LEFT JOIN riders rd ON o.rider_id = rd.id
        WHERE o.id = $1`, 
       [id]
     );
