@@ -51,6 +51,7 @@ async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
     'ASC'
   );
 
+
   if (!nearbyDrivers || nearbyDrivers.length === 0) return [];
 
   // Extract raw driver IDs
@@ -77,6 +78,9 @@ async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
       distanceKm: parseFloat(distance)
     }))
     .filter(item => !busyRiderIds.has(parseInt(item.driverId, 10)));
+    // Inside findNearbyDrivers(longitude, latitude, radiusKm)
+console.log('  -> [GEOSEARCH LOG] Raw Redis drivers found:', nearbyDrivers);
+console.log('  -> [BUSY CHECK] Busy Rider IDs in Postgres:', Array.from(busyRiderIds));
 }
 /**
  * Removes a driver from the Geo index when they go offline or stop accepting orders.
