@@ -100,13 +100,16 @@ const initSocket = (server) => {
 
       try {
         // Atomic DB Update: Assign order ONLY if status is still Pending
-        const updateRes = await pool.query(
-          `UPDATE orders 
-           SET rider_id = $1, status = 'Accepted' 
-           WHERE id = $2 AND status = 'Pending' AND rider_id IS NULL 
-           RETURNING *`,
-          [cleanRiderId, orderId]
-        );
+// Replace the UPDATE query inside accept_order:
+const updateRes = await pool.query(
+  `UPDATE orders 
+   SET rider_id = $1, status = 'Accepted' 
+   WHERE id = $2 
+     AND (status IN ('Pending', 'Placed', 'Paid', 'Created') OR status IS NULL)
+     AND (rider_id IS NULL OR rider_id = $1)
+   RETURNING *`,
+  [cleanRiderId, orderId]
+);
 
         if (updateRes.rows.length === 0) {
           console.warn(`⚠️ Order ${orderId} already taken or not pending.`);
