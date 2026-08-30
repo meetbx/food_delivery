@@ -1,323 +1,136 @@
 const { Server } = require('socket.io');
-const { pool } = require('./db');
-const {
-  updateDriverLocation,
-  removeDriverLocation,
-  findNearbyDrivers
+const { 
+  updateDriverLocation, 
+  removeDriverLocation 
 } = require('./services/deliveryService');
 
 let io;
+
+// Active tracking map: driverId -> current socket.id
 const activeDriverSockets = new Map();
 
-const cleanId = (id) => String(id || '').replace(/^(driver_|rider_)/, '');
-
-async function getOrderRestaurant(orderId) {
-  const result = await pool.query(`
-    SELECT o.id, o.status, o.rider_id,
-           o.delivery_address, o.final_total,
-           r.name AS restaurant_name,
-           r.address AS restaurant_address,
-           r.latitude AS restaurant_latitude,
-           r.longitude AS restaurant_longitude
-    FROM orders o
-    LEFT JOIN restaurants r ON r.id = o.restaurant_id
-    WHERE o.id = $1
-  `, [orderId]);
-  return result.rows[0] || null;
-}
-
-async function dispatchNextRider(orderId, excludedRiderIds = []) {
-  const order = await getOrderRestaurant(orderId);
-  if (!order || ['Accepted', 'Picked Up', 'Delivered', 'Cancelled'].includes(order.status)) return null;
-
-  const restLat = parseFloat(order.restaurant_latitude);
-  const restLng = parseFloat(order.restaurant_longitude);
-  if (isNaN(restLat) || isNaN(restLng)) return null;
-
-  const excluded = new Set(excludedRiderIds.map(id => cleanId(id)));
-  if (order.rider_id) excluded.add(cleanId(order.rider_id));
-
-  // Never offer again to a rider who already declined/expired this order.
-  const priorOffers = await pool.query(`
-    SELECT rider_id
-    FROM order_rider_offers
-    WHERE order_id = $1
-      AND status IN ('declined', 'expired', 'accepted')
-  `, [orderId]);
-  priorOffers.rows.forEach(row => excluded.add(cleanId(row.rider_id)));
-
-  const nearby = await findNearbyDrivers(restLng, restLat, 10);
-
-  for (const candidate of nearby) {
-    const riderId = cleanId(candidate.driverId);
-    if (!riderId || excluded.has(riderId)) continue;
-
-    // Only offer to an online rider with a connected socket.
-    if (!activeDriverSockets.has(riderId)) continue;
-
-    const riderResult = await pool.query(`
-      SELECT r.id, r.name, r.last_latitude, r.last_longitude
-      FROM riders r
-      WHERE r.id = $1
-        AND r.is_online = true
-        AND NOT EXISTS (
-          SELECT 1
-          FROM orders ao
-          WHERE ao.rider_id = r.id
-            AND ao.status IN ('Accepted', 'Picked Up', 'Out for Delivery')
-        )
-    `, [riderId]);
-    if (!riderResult.rows.length) continue;
-
-    await pool.query(`
-      INSERT INTO order_rider_offers (order_id, rider_id, status, offered_at)
-      VALUES ($1, $2, 'offered', NOW())
-      ON CONFLICT (order_id, rider_id)
-      DO UPDATE SET status = 'offered', offered_at = NOW(), responded_at = NULL
-    `, [orderId, riderId]);
-
-    const payload = {
-      orderId: Number(orderId),
-      id: Number(orderId),
-      restaurant: order.restaurant_name || 'Restaurant',
-      restaurantAddress: order.restaurant_address || 'Restaurant Location',
-      deliveryAddress: order.delivery_address || 'Customer Location',
-      earnings: `₹${Math.round((order.final_total || 0) * 0.2) || 65}`,
-      pickupDistance: `${Number(candidate.distanceKm).toFixed(1)} km`,
-      distanceKm: candidate.distanceKm,
-      riderLocation: {
-        lat: parseFloat(riderResult.rows[0].last_latitude),
-        lng: parseFloat(riderResult.rows[0].last_longitude)
-      }
-    };
-
-    io.to(`driver_${riderId}`).emit('new_order_offer', payload);
-    io.to(`rider_${riderId}`).emit('new_order_offer', payload);
-    console.log(`[DISPATCH] Order ${orderId} offered to rider ${riderId} (${candidate.distanceKm} km)`);
-    return riderId;
-  }
-
-  console.log(`[DISPATCH] No eligible rider found for order ${orderId}`);
-  return null;
-}
-
+/**
+ * Initializes Socket.IO on the HTTP server
+ * @param {Object} server - Node.js HTTP Server instance
+ */
 const initSocket = (server) => {
   io = new Server(server, {
-    cors: { origin: '*', methods: ['GET', 'POST', 'PATCH'] }
+    cors: {
+      origin: '*', // Allows local testing across frontend ports (e.g. 5173 / 3000)
+      methods: ['GET', 'POST'],
+    },
   });
 
   io.on('connection', (socket) => {
     console.log(`[Socket Connected]: ${socket.id}`);
+
+    // Map to track active driver ID associated with this socket connection
     let currentDriverId = null;
 
-    const joinOrder = ({ orderId }) => {
+    // 1. Join Order Room for trial/order tracking
+    socket.on('join_trial_room', ({ orderId }) => {
       if (!orderId) return;
-      socket.join(`order_${orderId}`);
-      console.log(`Socket ${socket.id} joined order_${orderId}`);
-    };
-
-    socket.on('join_order_room', joinOrder);
-    socket.on('join_trial_room', joinOrder);
-
-    socket.on('register_rider', ({ riderId, driverId }) => {
-      const id = cleanId(riderId || driverId);
-      if (!id) return;
-      currentDriverId = id;
-      activeDriverSockets.set(id, socket.id);
-      pool.query('UPDATE riders SET is_online = true WHERE id = $1', [id]).catch(err =>
-        console.error('[ONLINE STATUS ERROR]', err.message)
-      );
-      socket.join('active_riders');
-      socket.join(`driver_${id}`);
-      socket.join(`rider_${id}`);
+      const roomName = `order_${orderId}`;
+      socket.join(roomName);
+      console.log(`Socket ${socket.id} joined room ${roomName}`);
     });
 
-    socket.on('send_rider_location', async (data = {}) => {
-      const id = cleanId(data.driverId || data.riderId || currentDriverId);
-      const lat = parseFloat(data.lat);
-      const lng = parseFloat(data.lng);
-      if (!id || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    // 2. Register Rider / Driver into personal notification rooms
+   socket.on('register_rider', ({ riderId, driverId }) => {
+  const activeId = riderId || driverId;
+  if (!activeId) return;
 
-      try {
-        // Redis = fast live geo index.
-        await updateDriverLocation(id, lng, lat);
+  const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+  currentDriverId = cleanId;
 
-        // PostgreSQL = authoritative latest location + timestamp.
-        await pool.query(`
-          UPDATE riders
-          SET last_latitude = $1,
-              last_longitude = $2,
-              last_location_updated_at = NOW()
-          WHERE id = $3
-        `, [lat, lng, id]);
+  activeDriverSockets.set(cleanId, socket.id);
 
-        // If this rider has an accepted order, broadcast every GPS update to that order.
-        const activeOrder = await pool.query(`
-          SELECT id, status
-          FROM orders
-          WHERE rider_id = $1
-            AND status IN ('Accepted', 'Picked Up', 'Out for Delivery')
-          ORDER BY id DESC
-          LIMIT 1
-        `, [id]);
+  socket.join('active_riders');
+  socket.join(`driver_${cleanId}`);
+  socket.join(`rider_${cleanId}`);
 
-        if (activeOrder.rows.length) {
-          const orderId = activeOrder.rows[0].id;
-          io.to(`order_${orderId}`).emit('rider_location_updated', {
-            orderId,
-            riderId: Number(id),
-            lat,
-            lng,
-            timestamp: Date.now()
-          });
-        }
-      } catch (err) {
-        console.error('[LOCATION ERROR]', err.message);
-      }
+  console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+  console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
+});
+
+    // 3. Receive live coordinates from Simulator or Rider App
+socket.on('send_rider_location', async (data) => {
+  const { driverId, riderId, lat, lng } = data;
+  const targetDriverId = driverId || riderId || currentDriverId;
+  const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
+
+  console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
+
+  try {
+    await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
+    console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
+  } catch (err) {
+    console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
+  }
     });
 
-    socket.on('accept_order', async ({ orderId, riderId, driverId }) => {
-      const id = cleanId(riderId || driverId || currentDriverId);
-      if (!orderId || !id) return;
-
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        // First rider to accept wins.
-        const orderResult = await client.query(`
-          SELECT id, status, rider_id
-          FROM orders
-          WHERE id = $1
-          FOR UPDATE
-        `, [orderId]);
-
-        if (!orderResult.rows.length) throw new Error('Order not found');
-        const order = orderResult.rows[0];
-
-        if (order.rider_id || order.status !== 'Pending') {
-          await client.query('ROLLBACK');
-          socket.emit('order_accept_failed', { orderId, message: 'Order is no longer available.' });
-          return;
-        }
-
-        const riderResult = await client.query(`
-          SELECT id, name, last_latitude, last_longitude
-          FROM riders
-          WHERE id = $1 AND is_online = true
-        `, [id]);
-
-        if (!riderResult.rows.length) throw new Error('Rider is offline or not found');
-
-        await client.query(`
-          UPDATE orders
-          SET rider_id = $1, status = 'Accepted'
-          WHERE id = $2
-        `, [id, orderId]);
-
-        await client.query(`
-          INSERT INTO order_rider_offers (order_id, rider_id, status, responded_at)
-          VALUES ($1, $2, 'accepted', NOW())
-          ON CONFLICT (order_id, rider_id)
-          DO UPDATE SET status = 'accepted', responded_at = NOW()
-        `, [orderId, id]);
-
-        await client.query(`
-          UPDATE order_rider_offers
-          SET status = 'expired', responded_at = NOW()
-          WHERE order_id = $1 AND rider_id <> $2 AND status = 'offered'
-        `, [orderId, id]);
-
-        await client.query('COMMIT');
-
-        const rider = riderResult.rows[0];
-        const riderLocation = {
-          lat: parseFloat(rider.last_latitude),
-          lng: parseFloat(rider.last_longitude)
-        };
-
-        io.to(`order_${orderId}`).emit('order_accepted', {
-          orderId: Number(orderId),
-          riderId: Number(id),
-          riderLocation: Number.isFinite(riderLocation.lat) && Number.isFinite(riderLocation.lng)
-            ? riderLocation : null
-        });
-
-        // Tell all other riders who received this offer to remove it.
-        io.emit('order_taken', { orderId: Number(orderId), riderId: Number(id) });
-        socket.emit('order_accept_success', { orderId: Number(orderId) });
-      } catch (err) {
-        try { await client.query('ROLLBACK'); } catch (_) {}
-        console.error('[ACCEPT ORDER ERROR]', err.message);
-        socket.emit('order_accept_failed', { orderId, message: err.message });
-      } finally {
-        client.release();
-      }
-    });
-
-    socket.on('decline_order', async ({ orderId, riderId, driverId }) => {
-      const id = cleanId(riderId || driverId || currentDriverId);
-      if (!orderId || !id) return;
-
-      try {
-        await pool.query(`
-          INSERT INTO order_rider_offers (order_id, rider_id, status, responded_at)
-          VALUES ($1, $2, 'declined', NOW())
-          ON CONFLICT (order_id, rider_id)
-          DO UPDATE SET status = 'declined', responded_at = NOW()
-        `, [orderId, id]);
-
-        const nextRiderId = await dispatchNextRider(orderId, [id]);
-        socket.emit('order_declined', {
-          orderId: Number(orderId),
-          nextRiderId: nextRiderId ? Number(nextRiderId) : null
-        });
-      } catch (err) {
-        console.error('[DECLINE ORDER ERROR]', err.message);
-      }
-    });
-
-    socket.on('leave_order_room', ({ orderId }) => {
-      if (orderId) socket.leave(`order_${orderId}`);
-    });
-    socket.on('leave_trial_room', ({ orderId }) => {
-      if (orderId) socket.leave(`order_${orderId}`);
-    });
-
-    socket.on('driver_offline', async ({ driverId, riderId } = {}) => {
-      const id = cleanId(driverId || riderId || currentDriverId);
-      if (!id) return;
-      activeDriverSockets.delete(id);
-      try {
-        await removeDriverLocation(id);
-        await pool.query('UPDATE riders SET is_online = false WHERE id = $1', [id]);
-      } catch (err) {
-        console.error('[OFFLINE ERROR]', err.message);
-      }
-    });
-
-    socket.on('disconnect', () => {
-      if (!currentDriverId) return;
-      const id = currentDriverId;
-      const disconnectedSocketId = socket.id;
-      setTimeout(async () => {
-        if (activeDriverSockets.get(id) !== disconnectedSocketId) return;
-        activeDriverSockets.delete(id);
+    // 4. Express Rider Offline status explicitly
+    socket.on('driver_offline', async ({ driverId, riderId }) => {
+      const idToRemove = driverId || riderId || currentDriverId;
+      if (idToRemove) {
+        const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
+        activeDriverSockets.delete(cleanId);
         try {
-          await removeDriverLocation(id);
+          await removeDriverLocation(`driver_${cleanId}`);
+          await removeDriverLocation(`rider_${cleanId}`);
+          console.log(`Driver ${cleanId} marked offline in Redis`);
         } catch (err) {
-          console.error('[DISCONNECT CLEANUP]', err.message);
+          console.error(`Error removing driver ${cleanId} from Redis:`, err.message);
         }
-      }, 5000);
+      }
+    });
+
+    // 5. Leave Order Room
+    socket.on('leave_trial_room', ({ orderId }) => {
+      const roomName = `order_${orderId}`;
+      socket.leave(roomName);
+      console.log(`Socket ${socket.id} left room ${roomName}`);
+    });
+
+    // 6. Cleanup on Disconnect (Safe Grace Period)
+    socket.on('disconnect', async () => {
+      console.log(`[Socket Disconnected]: ${socket.id}`);
+
+      if (currentDriverId) {
+        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+        const disconnectedSocketId = socket.id;
+
+        // Grace period: Wait 5 seconds before removing from Redis
+        setTimeout(async () => {
+          // CRITICAL FIX: Only remove if driver HAS NOT reconnected with a new socket
+          if (activeDriverSockets.get(cleanId) === disconnectedSocketId) {
+            activeDriverSockets.delete(cleanId);
+            try {
+              await removeDriverLocation(`driver_${cleanId}`);
+              await removeDriverLocation(`rider_${cleanId}`);
+              console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
+            } catch (err) {
+              console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+            }
+          } else {
+            console.log(`Driver ${cleanId} reconnected on a new socket. Preserved in Redis.`);
+          }
+        }, 5000);
+      }
     });
   });
 
   return io;
 };
 
+/**
+ * Getter to access the initialized Socket.IO instance elsewhere in the backend
+ */
 const getIo = () => {
-  if (!io) throw new Error('Socket.io has not been initialized!');
+  if (!io) {
+    throw new Error('Socket.io has not been initialized!');
+  }
   return io;
 };
 
-module.exports = { initSocket, getIo, dispatchNextRider };
+module.exports = { initSocket, getIo };
