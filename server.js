@@ -727,73 +727,20 @@ app.post('/api/orders', async (req, res) => {
         if (nearbyDrivers && nearbyDrivers.length > 0) {
           console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
 
-const emittedDriverIds = new Set();
+nearbyDrivers.forEach((driver) => {
+  // Extract driverId if driver is an object, otherwise use driver directly
+  const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
+  const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
 
-for (const driver of nearbyDrivers) {
-  const rawId = typeof driver === 'object'
-    ? (driver?.driverId ?? driver?.riderId ?? driver?.id)
-    : driver;
+  const driverRoom = `driver_${cleanId}`;
+  const riderRoom = `rider_${cleanId}`;
 
-  if (rawId === null || rawId === undefined || String(rawId).trim() === '') {
-    console.warn('⚠️ [OFFER SKIP] Redis returned driver without a valid ID:', driver);
-    continue;
-  }
+  console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
 
-  const cleanId = String(rawId).replace(/^(driver_|rider_)/, '').trim();
-  if (!/^\d+$/.test(cleanId) || Number(cleanId) <= 0) {
-    console.warn(`⚠️ [OFFER SKIP] Invalid rider ID from Redis: ${rawId}`);
-    continue;
-  }
-
-  if (emittedDriverIds.has(cleanId)) continue;
-  emittedDriverIds.add(cleanId);
-
-  try {
-    const active = await pool.query(`
-      SELECT 1 FROM orders
-      WHERE rider_id = $1
-        AND status IN ('Accepted', 'Picked Up', 'Out for Delivery')
-      LIMIT 1
-    `, [Number(cleanId)]);
-
-    if (active.rows.length) {
-      console.log(`⏭️ [OFFER SKIP] Rider ${cleanId} already has an active delivery`);
-      continue;
-    }
-
-    // Do not create a second offer record for the same order/rider.
-    const offerInsert = await pool.query(`
-      INSERT INTO order_rider_offers (order_id, rider_id, status, offered_at)
-      VALUES ($1, $2, 'offered', NOW())
-      ON CONFLICT (order_id, rider_id) DO NOTHING
-      RETURNING order_id
-    `, [newOrder.id, Number(cleanId)]);
-
-    // If an offer already exists, do not emit another popup.
-    if (offerInsert.rows.length === 0) {
-      console.log(`⏭️ [OFFER DUPLICATE SKIP] Order ${newOrder.id} already offered to rider ${cleanId}`);
-      continue;
-    }
-
-    const driverRoom = `driver_${cleanId}`;
-    const riderRoom = `rider_${cleanId}`;
-    const targetSockets = new Set();
-
-    const driverMembers = io.sockets.adapter.rooms.get(driverRoom);
-    const riderMembers = io.sockets.adapter.rooms.get(riderRoom);
-
-    if (driverMembers) driverMembers.forEach(id => targetSockets.add(id));
-    if (riderMembers) riderMembers.forEach(id => targetSockets.add(id));
-
-    console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId} | sockets: ${targetSockets.size}`);
-
-    for (const socketId of targetSockets) {
-      io.to(socketId).emit('new_order_offer', orderOfferPayload);
-    }
-  } catch (offerErr) {
-    console.error(`❌ [OFFER ERROR] Rider ${cleanId}:`, offerErr.message);
-  }
-}
+  // Emit to driver room and rider room individually
+  io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
+  io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
+});
 
           // Fallback broadcast to ensure all online drivers receive the offer
         //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
@@ -990,68 +937,50 @@ app.get('/api/orders/pending-offers', async (req, res) => {
       return res.status(200).json({ success: true, data: null });
     }
 
-    const cleanDriverId = parseInt(
-      String(activeDriverId).replace(/^(driver_|rider_)/, ''),
-      10
-    );
+    const cleanDriverId = parseInt(String(activeDriverId).replace(/^(driver_|rider_)/, ''), 10);
+    const validDriverId = isNaN(cleanDriverId) ? null : cleanDriverId;
 
-    if (!Number.isInteger(cleanDriverId) || cleanDriverId <= 0) {
-      return res.status(200).json({ success: true, data: null });
-    }
-
-    // IMPORTANT:
-    // Only return offers that are genuinely still offered to this rider.
-    // Accepted/rejected offers can never come back after reconnect/login.
-    // Old offers are also ignored after 15 minutes so stale records cannot
-    // suddenly appear as a brand-new popup.
+    // Fetch active unassigned/pending orders along with restaurant coordinates
     const query = `
-      SELECT
-        o.*,
-        COALESCE(r.name, 'Main Kitchen') AS restaurant_name,
-        r.address AS restaurant_address,
-        r.latitude AS restaurant_latitude,
-        r.longitude AS restaurant_longitude,
-        oro.status AS offer_status,
-        oro.offered_at
-      FROM order_rider_offers oro
-      JOIN orders o ON o.id = oro.order_id
+      SELECT o.*, 
+             COALESCE(r.name, 'Main Kitchen') AS restaurant_name, 
+             r.address AS restaurant_address,
+             r.latitude AS restaurant_latitude,
+             r.longitude AS restaurant_longitude
+      FROM orders o
       LEFT JOIN restaurants r ON o.restaurant_id = r.id
-      WHERE oro.rider_id = $1
-        AND oro.status = 'offered'
-        AND oro.offered_at >= NOW() - INTERVAL '15 minutes'
-        AND o.status = 'Pending'
-        AND o.rider_id IS NULL
-      ORDER BY oro.offered_at DESC
-      LIMIT 20;
+      WHERE (o.rider_id = $1 OR o.status = 'Pending') 
+        AND o.status NOT IN ('Delivered', 'Cancelled')
+      ORDER BY o.id DESC;
     `;
 
-    const result = await pool.query(query, [cleanDriverId]);
+    const result = await pool.query(query, [validDriverId]);
 
     if (result.rows.length === 0) {
       return res.status(200).json({ success: true, data: null });
     }
 
-    const MAX_RADIUS_KM = parseFloat(process.env.RIDER_SEARCH_RADIUS_KM || '10');
+    // Radius Filter: Max 15 km from restaurant
+    const MAX_RADIUS_KM = 15;
     const driverLat = parseFloat(lat);
     const driverLng = parseFloat(lng);
+
     let matchingOrder = null;
 
     for (const order of result.rows) {
       const restLat = parseFloat(order.restaurant_latitude);
       const restLng = parseFloat(order.restaurant_longitude);
 
-      if (
-        Number.isFinite(driverLat) && Number.isFinite(driverLng) &&
-        Number.isFinite(restLat) && Number.isFinite(restLng)
-      ) {
-        const R = 6371;
+      // If driver coordinates & restaurant coordinates exist, calculate distance
+      if (!isNaN(driverLat) && !isNaN(driverLng) && !isNaN(restLat) && !isNaN(restLng)) {
+        // Haversine formula distance calculation
+        const R = 6371; // Earth radius in km
         const dLat = (restLat - driverLat) * (Math.PI / 180);
         const dLng = (restLng - driverLng) * (Math.PI / 180);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(driverLat * (Math.PI / 180)) *
-          Math.cos(restLat * (Math.PI / 180)) *
-          Math.sin(dLng / 2) ** 2;
+        const a = 
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(driverLat * (Math.PI / 180)) * Math.cos(restLat * (Math.PI / 180)) * 
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distanceKm = R * c;
 
@@ -1060,8 +989,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
           break;
         }
       } else {
-        // The backend already targeted this rider, so coordinates are optional
-        // for reconnect recovery.
+        // Fallback: If coordinates aren't supplied, return the latest pending order
         matchingOrder = order;
         break;
       }
@@ -1080,7 +1008,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
         restaurantAddress: matchingOrder.restaurant_address || 'Main Kitchen Location',
         deliveryAddress: matchingOrder.delivery_address || 'Customer Location',
         earnings: `₹${Math.round((matchingOrder.final_total || 0) * 0.2) || 65}`,
-        pickupDistance: matchingOrder.distanceKm ? `${matchingOrder.distanceKm} km` : 'Nearby',
+        pickupDistance: matchingOrder.distanceKm ? `${matchingOrder.distanceKm} km` : '1.2 km',
         dropDistance: '3.5 km',
         lat: matchingOrder.delivery_latitude,
         lng: matchingOrder.delivery_longitude
@@ -1088,151 +1016,9 @@ app.get('/api/orders/pending-offers', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching pending offers:', error.message);
-    return res.status(200).json({ success: true, data: null });
+    res.status(200).json({ success: true, data: null });
   }
 });
-
-// -------------------------------------------------------------
-// RIDER OFFER ACTIONS
-// -------------------------------------------------------------
-
-// Accept exactly one outstanding offer atomically.
-app.post('/api/rider/offers/:orderId/accept', async (req, res) => {
-  const client = await pool.connect();
-
-  try {
-    const orderId = Number(req.params.orderId);
-    const riderId = Number(req.body?.riderId);
-
-    if (!Number.isInteger(orderId) || orderId <= 0 || !Number.isInteger(riderId) || riderId <= 0) {
-      return res.status(400).json({ success: false, message: 'Valid orderId and riderId are required.' });
-    }
-
-    await client.query('BEGIN');
-
-    // Lock the offer row so two requests/taps cannot accept the same offer.
-    const offerResult = await client.query(
-      `SELECT order_id, rider_id, status
-       FROM order_rider_offers
-       WHERE order_id = $1 AND rider_id = $2
-       FOR UPDATE`,
-      [orderId, riderId]
-    );
-
-    if (offerResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ success: false, message: 'Offer not found.' });
-    }
-
-    if (offerResult.rows[0].status !== 'offered') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ success: false, message: 'This offer is no longer available.' });
-    }
-
-    // Lock the order and make sure nobody else has claimed it.
-    const orderResult = await client.query(
-      `SELECT id, status, rider_id
-       FROM orders
-       WHERE id = $1
-       FOR UPDATE`,
-      [orderId]
-    );
-
-    if (orderResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ success: false, message: 'Order not found.' });
-    }
-
-    const order = orderResult.rows[0];
-
-    if (order.status !== 'Pending' || order.rider_id !== null) {
-      await client.query(
-        `UPDATE order_rider_offers
-         SET status = 'rejected'
-         WHERE order_id = $1 AND status = 'offered'`,
-        [orderId]
-      );
-      await client.query('COMMIT');
-      return res.status(409).json({ success: false, message: 'Order has already been assigned.' });
-    }
-
-    const acceptedOrder = await client.query(
-      `UPDATE orders
-       SET rider_id = $1, status = 'Accepted'
-       WHERE id = $2 AND status = 'Pending' AND rider_id IS NULL
-       RETURNING *`,
-      [riderId, orderId]
-    );
-
-    if (acceptedOrder.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ success: false, message: 'Order was accepted by another rider.' });
-    }
-
-    // This rider's offer becomes accepted; all competing offers become invalid.
-    await client.query(
-      `UPDATE order_rider_offers
-       SET status = CASE WHEN rider_id = $2 THEN 'accepted' ELSE 'rejected' END
-       WHERE order_id = $1 AND status = 'offered'`,
-      [orderId, riderId]
-    );
-
-    await client.query('COMMIT');
-
-    // Tell every currently connected rider that this order is no longer available.
-    try {
-      const io = getIo();
-      io.to(`order_${orderId}`).emit('order_offer_closed', {
-        orderId,
-        acceptedBy: riderId
-      });
-    } catch (socketErr) {
-      console.warn('[ACCEPT SOCKET NOTICE WARNING]:', socketErr.message);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Offer accepted successfully.',
-      order: acceptedOrder.rows[0]
-    });
-  } catch (error) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('❌ Error accepting rider offer:', error.message);
-    return res.status(500).json({ success: false, message: 'Server error accepting offer.' });
-  } finally {
-    client.release();
-  }
-});
-
-// Reject one outstanding offer.
-app.post('/api/rider/offers/:orderId/reject', async (req, res) => {
-  try {
-    const orderId = Number(req.params.orderId);
-    const riderId = Number(req.body?.riderId);
-
-    if (!Number.isInteger(orderId) || orderId <= 0 || !Number.isInteger(riderId) || riderId <= 0) {
-      return res.status(400).json({ success: false, message: 'Valid orderId and riderId are required.' });
-    }
-
-    const result = await pool.query(
-      `UPDATE order_rider_offers
-       SET status = 'rejected'
-       WHERE order_id = $1 AND rider_id = $2 AND status = 'offered'
-       RETURNING order_id, rider_id, status`,
-      [orderId, riderId]
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: result.rows.length ? 'Offer rejected.' : 'Offer was already closed.',
-      offer: result.rows[0] || null
-    });
-  } catch (error) {
-    console.error('❌ Error rejecting rider offer:', error.message);
-    return res.status(500).json({ success: false, message: 'Server error rejecting offer.' });
-  }
-});
-
 app.get('/api/orders/:id', getOrderDetails);
 app.get('/api/order-tracking/:id', getOrderDetails);
 
