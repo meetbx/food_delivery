@@ -36,23 +36,41 @@ const initSocket = (server) => {
     });
 
     // 2. Register Rider / Driver into personal notification rooms
-   socket.on('register_rider', ({ riderId, driverId }) => {
-  const activeId = riderId || driverId;
-  if (!activeId) return;
+ // REPLACE Lines 32-47 in socket.js with this:
 
-  const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
-  currentDriverId = cleanId;
+    // 2. Register Rider / Driver into personal notification rooms & sync state
+    socket.on('register_rider', async (data) => {
+      const activeId = typeof data === 'object' ? (data.riderId || data.driverId) : data;
+      if (!activeId) return;
 
-  activeDriverSockets.set(cleanId, socket.id);
+      const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+      const numericId = parseInt(cleanId, 10);
+      currentDriverId = cleanId;
 
-  socket.join('active_riders');
-  socket.join(`driver_${cleanId}`);
-  socket.join(`rider_${cleanId}`);
+      activeDriverSockets.set(cleanId, socket.id);
 
-  console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
-  console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
-});
+      socket.join('active_riders');
+      socket.join(`driver_${cleanId}`);
+      socket.join(`rider_${cleanId}`);
 
+      console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+
+      // Active Delivery Sync: Check if rider is currently executing an active order
+      if (!isNaN(numericId)) {
+        try {
+          const activeOrderRes = await pool.query(
+            `SELECT * FROM orders WHERE rider_id = $1 AND status NOT IN ('Delivered', 'Cancelled') LIMIT 1`,
+            [numericId]
+          );
+
+          if (activeOrderRes.rows.length > 0) {
+            socket.emit('active_order_sync', activeOrderRes.rows[0]);
+          }
+        } catch (syncErr) {
+          console.error(`[SYNC ERROR] Rider ${cleanId}:`, syncErr.message);
+        }
+      }
+    });
     // 3. Receive live coordinates from Simulator or Rider App
 socket.on('send_rider_location', async (data) => {
   const { driverId, riderId, lat, lng } = data;
