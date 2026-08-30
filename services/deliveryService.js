@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { redis } = require('../db'); // Import the exported Redis instance from your db.js
+const pool = require('../db');
 
 const DRIVER_GEO_KEY = 'drivers:locations';
 
@@ -27,8 +28,11 @@ async function updateDriverLocation(driverId, longitude, latitude) {
   await redis.geoadd(DRIVER_GEO_KEY, lng, lat, driverId.toString());
 }
 
+// REPLACE Lines 31-55 in deliveryService.js with this:
+
 /**
- * Finds drivers near a specific location within a given radius (in km).
+ * Finds drivers near a specific location within a given radius (in km)
+ * and filters out drivers who currently have active (undelivered) orders.
  */
 async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
   const lng = parseFloat(longitude);
@@ -47,12 +51,33 @@ async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
     'ASC'
   );
 
-  return nearbyDrivers.map(([driverId, distance]) => ({
-    driverId,
-    distanceKm: parseFloat(distance)
-  }));
-}
+  if (!nearbyDrivers || nearbyDrivers.length === 0) return [];
 
+  // Extract raw driver IDs
+  const candidateIds = nearbyDrivers.map(([driverId]) => {
+    return parseInt(String(driverId).replace(/^(driver_|rider_)/, ''), 10);
+  }).filter(id => !isNaN(id));
+
+  if (candidateIds.length === 0) return [];
+
+  // Query PostgreSQL: Filter out drivers who are already on active orders
+  const activeRidersQuery = `
+    SELECT DISTINCT rider_id 
+    FROM orders 
+    WHERE rider_id = ANY($1::int[]) 
+      AND status NOT IN ('Delivered', 'Cancelled')
+  `;
+  const activeRes = await pool.query(activeRidersQuery, [candidateIds]);
+  const busyRiderIds = new Set(activeRes.rows.map(r => r.rider_id));
+
+  // Filter out busy drivers
+  return nearbyDrivers
+    .map(([driverId, distance]) => ({
+      driverId: String(driverId).replace(/^(driver_|rider_)/, ''),
+      distanceKm: parseFloat(distance)
+    }))
+    .filter(item => !busyRiderIds.has(parseInt(item.driverId, 10)));
+}
 /**
  * Removes a driver from the Geo index when they go offline or stop accepting orders.
  */
