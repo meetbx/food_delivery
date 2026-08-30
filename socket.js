@@ -3,8 +3,7 @@ const {
   updateDriverLocation, 
   removeDriverLocation 
 } = require('./services/deliveryService');
-// At the top of backend/socket.js
-const { pool } = require('./db');// Adjust path if your DB config file is located elsewhere (e.g., './config/db')
+const { pool } = require('./db');
 
 let io;
 
@@ -36,9 +35,6 @@ const initSocket = (server) => {
       socket.join(roomName);
       console.log(`Socket ${socket.id} joined room ${roomName}`);
     });
-
-    // 2. Register Rider / Driver into personal notification rooms
- // REPLACE Lines 32-47 in socket.js with this:
 
     // 2. Register Rider / Driver into personal notification rooms & sync state
     socket.on('register_rider', async (data) => {
@@ -73,23 +69,74 @@ const initSocket = (server) => {
         }
       }
     });
+
     // 3. Receive live coordinates from Simulator or Rider App
-socket.on('send_rider_location', async (data) => {
-  const { driverId, riderId, lat, lng } = data;
-  const targetDriverId = driverId || riderId || currentDriverId;
-  const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
+    socket.on('send_rider_location', async (data) => {
+      const { driverId, riderId, lat, lng } = data;
+      const targetDriverId = driverId || riderId || currentDriverId;
+      const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
 
-  console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
+      console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
 
-  try {
-    await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
-    console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
-  } catch (err) {
-    console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
-  }
+      try {
+        await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
+        console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
+      } catch (err) {
+        console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
+      }
     });
 
-    // 4. Express Rider Offline status explicitly
+    // 4. Handle Rider Order Acceptance via WebSockets
+    socket.on('accept_order', async (data) => {
+      console.log('📥 [SOCKET ACCEPT] Received accept_order payload:', data);
+      const { orderId, riderId, driverId } = data || {};
+      const activeRiderId = riderId || driverId;
+
+      if (!orderId || !activeRiderId) {
+        return socket.emit('order_accept_error', { message: 'Missing orderId or riderId' });
+      }
+
+      const cleanRiderId = parseInt(String(activeRiderId).replace(/^(driver_|rider_)/, ''), 10);
+
+      try {
+        // Atomic DB Update: Assign order ONLY if status is still Pending
+        const updateRes = await pool.query(
+          `UPDATE orders 
+           SET rider_id = $1, status = 'Accepted' 
+           WHERE id = $2 AND status = 'Pending' AND rider_id IS NULL 
+           RETURNING *`,
+          [cleanRiderId, orderId]
+        );
+
+        if (updateRes.rows.length === 0) {
+          console.warn(`⚠️ Order ${orderId} already taken or not pending.`);
+          return socket.emit('order_accept_error', { 
+            message: 'Order was already accepted by another rider or cancelled.' 
+          });
+        }
+
+        const updatedOrder = updateRes.rows[0];
+
+        // Clear pending offer statuses in tracking matrix
+        await pool.query(
+          `UPDATE order_rider_offers SET status = 'accepted', responded_at = NOW() WHERE order_id = $1 AND rider_id = $2`,
+          [orderId, cleanRiderId]
+        ).catch(() => {});
+
+        // Confirm acceptance back to the rider
+        socket.emit('order_accepted_success', updatedOrder);
+
+        // Broadcast live status update to customer tracking room
+        io.to(`order_${orderId}`).emit('order_status_update', updatedOrder);
+        
+        console.log(`✅ Order ${orderId} successfully assigned to Rider ${cleanRiderId}`);
+      } catch (err) {
+        console.error('Error in accept_order socket handler:', err.message);
+        socket.emit('order_accept_error', { message: 'Server error accepting order' });
+      }
+    });
+
+    // 5. Express Rider Offline status explicitly
     socket.on('driver_offline', async ({ driverId, riderId }) => {
       const idToRemove = driverId || riderId || currentDriverId;
       if (idToRemove) {
@@ -105,14 +152,14 @@ socket.on('send_rider_location', async (data) => {
       }
     });
 
-    // 5. Leave Order Room
+    // 6. Leave Order Room
     socket.on('leave_trial_room', ({ orderId }) => {
       const roomName = `order_${orderId}`;
       socket.leave(roomName);
       console.log(`Socket ${socket.id} left room ${roomName}`);
     });
 
-    // 6. Cleanup on Disconnect (Safe Grace Period)
+    // 7. Cleanup on Disconnect (Safe Grace Period)
     socket.on('disconnect', async () => {
       console.log(`[Socket Disconnected]: ${socket.id}`);
 
