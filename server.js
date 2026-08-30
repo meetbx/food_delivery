@@ -724,26 +724,32 @@ app.post('/api/orders', async (req, res) => {
           roomName: `order_${newOrder.id}`
         };
 
+// REPLACE Lines 430-500 in server.js with this:
+
         if (nearbyDrivers && nearbyDrivers.length > 0) {
           console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
 
-nearbyDrivers.forEach((driver) => {
-  // Extract driverId if driver is an object, otherwise use driver directly
-  const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
-  const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
+          for (const driver of nearbyDrivers) {
+            const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
+            const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
+            const numericRiderId = parseInt(cleanId, 10);
 
-  const driverRoom = `driver_${cleanId}`;
-  const riderRoom = `rider_${cleanId}`;
+            // Record offer state in PostgreSQL offer matrix
+            if (!isNaN(numericRiderId)) {
+              await pool.query(
+                `INSERT INTO order_rider_offers (order_id, rider_id, status) 
+                 VALUES ($1, $2, 'offered')
+                 ON CONFLICT (order_id, rider_id) DO UPDATE SET status = 'offered', offered_at = NOW()`,
+                [newOrder.id, numericRiderId]
+              ).catch(err => console.warn('Offer table record notice:', err.message));
+            }
 
-  console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
+            const driverRoom = `driver_${cleanId}`;
+            const riderRoom = `rider_${cleanId}`;
 
-  // Emit to driver room and rider room individually
-  io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
-  io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
-});
-
-          // Fallback broadcast to ensure all online drivers receive the offer
-        //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
+            io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
+            io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
+          }
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
         }
@@ -1017,6 +1023,61 @@ app.get('/api/orders/pending-offers', async (req, res) => {
   } catch (error) {
     console.error('Error fetching pending offers:', error.message);
     res.status(200).json({ success: true, data: null });
+  }
+});
+// ADD NEW ROUTE AFTER LINE 715 in server.js:
+
+// POST /api/orders/accept (Atomic Acceptance Guard)
+app.post('/api/orders/accept', async (req, res) => {
+  const { orderId, riderId, driverId } = req.body;
+  const activeRiderId = riderId || driverId;
+
+  if (!orderId || !activeRiderId) {
+    return res.status(400).json({ success: false, message: 'orderId and riderId are required.' });
+  }
+
+  const cleanRiderId = parseInt(String(activeRiderId).replace(/^(driver_|rider_)/, ''), 10);
+
+  try {
+    // 1. Atomic Update: Assign order ONLY if status is still Pending and rider_id is NULL
+    const updateRes = await pool.query(
+      `UPDATE orders 
+       SET rider_id = $1, status = 'Accepted' 
+       WHERE id = $2 AND status = 'Pending' AND rider_id IS NULL 
+       RETURNING *`,
+      [cleanRiderId, orderId]
+    );
+
+    if (updateRes.rows.length === 0) {
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Order was already accepted by another rider or cancelled.' 
+      });
+    }
+
+    const updatedOrder = updateRes.rows[0];
+
+    // 2. Expire non-accepted offers for this order in PostgreSQL
+    await pool.query(
+      `UPDATE order_rider_offers SET status = 'expired' WHERE order_id = $1 AND rider_id != $2`,
+      [orderId, cleanRiderId]
+    ).catch(() => {});
+
+    await pool.query(
+      `UPDATE order_rider_offers SET status = 'accepted', responded_at = NOW() WHERE order_id = $1 AND rider_id = $2`,
+      [orderId, cleanRiderId]
+    ).catch(() => {});
+
+    // 3. Broadcast real-time update to order room
+    const io = getIo();
+    if (io) {
+      io.to(`order_${orderId}`).emit('order_status_update', updatedOrder);
+    }
+
+    return res.json({ success: true, order: updatedOrder });
+  } catch (err) {
+    console.error('Error accepting order:', err.message);
+    return res.status(500).json({ success: false, message: 'Server error accepting order' });
   }
 });
 app.get('/api/orders/:id', getOrderDetails);
