@@ -46,7 +46,8 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
   `, [orderId]);
   priorOffers.rows.forEach(row => excluded.add(cleanId(row.rider_id)));
 
-  const nearby = await findNearbyDrivers(restLng, restLat, 10);
+  const searchRadiusKm = parseFloat(process.env.RIDER_SEARCH_RADIUS_KM || '10');
+  const nearby = await findNearbyDrivers(restLng, restLat, searchRadiusKm);
 
   for (const candidate of nearby) {
     const riderId = cleanId(candidate.driverId);
@@ -194,6 +195,24 @@ const initSocket = (server) => {
 
         if (!orderResult.rows.length) throw new Error('Order not found');
         const order = orderResult.rows[0];
+
+        // A rider can only have one active delivery at a time. This is a
+        // backend safety check in addition to the dashboard UI guard.
+        const activeDeliveryResult = await client.query(`
+          SELECT id
+          FROM orders
+          WHERE rider_id = $1
+            AND status IN ('Accepted', 'Picked Up', 'Out for Delivery')
+          LIMIT 1
+        `, [id]);
+        if (activeDeliveryResult.rows.length) {
+          await client.query('ROLLBACK');
+          socket.emit('order_accept_failed', {
+            orderId,
+            message: 'You already have an active delivery.'
+          });
+          return;
+        }
 
         if (order.rider_id || order.status !== 'Pending') {
           await client.query('ROLLBACK');
