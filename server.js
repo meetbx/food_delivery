@@ -694,7 +694,7 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 10;
+            const SEARCH_RADIUS_KM = 200;
 
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
           }
@@ -782,7 +782,7 @@ if (nearbyDrivers && nearbyDrivers.length > 0) {
       order: newOrder,
       dispatch: {
         restaurant: restaurantLocation,
-        searchRadiusKm: 10,
+        searchRadiusKm: 200,
         driversFoundCount: nearbyDrivers.length,
         nearbyDrivers
       }
@@ -864,6 +864,7 @@ const getOrderDetails = async (req, res) => {
        FROM orders o 
        LEFT JOIN restaurants r ON o.restaurant_id = r.id 
        LEFT JOIN users u ON o.user_id = u.id
+       LEFT JOIN riders rd ON o.rider_id = rd.id
        WHERE o.id = $1`, 
       [id]
     );
