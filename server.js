@@ -694,7 +694,7 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = parseFloat(process.env.RIDER_SEARCH_RADIUS_KM || '200');
+            const SEARCH_RADIUS_KM = 200;
 
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
           }
@@ -727,39 +727,21 @@ app.post('/api/orders', async (req, res) => {
         if (nearbyDrivers && nearbyDrivers.length > 0) {
           console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
 
-for (const driver of nearbyDrivers) {
+nearbyDrivers.forEach((driver) => {
+  // Extract driverId if driver is an object, otherwise use driver directly
   const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
   const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
 
-  try {
-    // Do not send a new offer to a rider who is already delivering another order.
-    const active = await pool.query(`
-      SELECT 1 FROM orders
-      WHERE rider_id = $1
-        AND status IN ('Accepted', 'Picked Up', 'Out for Delivery')
-      LIMIT 1
-    `, [cleanId]);
-    if (active.rows.length) {
-      console.log(`⏭️ [OFFER SKIP] Rider ${cleanId} already has an active delivery`);
-      return;
-    }
+  const driverRoom = `driver_${cleanId}`;
+  const riderRoom = `rider_${cleanId}`;
 
-    // Persist every socket offer so reconnect/login recovery can only show real offers.
-    await pool.query(`
-      INSERT INTO order_rider_offers (order_id, rider_id, status, offered_at)
-      VALUES ($1, $2, 'offered', NOW())
-      ON CONFLICT (order_id, rider_id) DO NOTHING
-    `, [newOrder.id, cleanId]);
+  console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
 
-    const driverRoom = `driver_${cleanId}`;
-    const riderRoom = `rider_${cleanId}`;
-    console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
-    io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
-    io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
-  } catch (offerErr) {
-    console.error(`❌ [OFFER ERROR] Rider ${cleanId}:`, offerErr.message);
-  }
-}
+  // Emit to driver room and rider room individually
+  io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
+  io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
+});
+
           // Fallback broadcast to ensure all online drivers receive the offer
         //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
         } else {
@@ -957,40 +939,32 @@ app.get('/api/orders/pending-offers', async (req, res) => {
     }
 
     const cleanDriverId = parseInt(String(activeDriverId).replace(/^(driver_|rider_)/, ''), 10);
-    if (isNaN(cleanDriverId)) {
-      return res.status(200).json({ success: true, data: null });
-    }
+    const validDriverId = isNaN(cleanDriverId) ? null : cleanDriverId;
 
-    // IMPORTANT: this endpoint is only for actual outstanding offers.
-    // Do not return orders merely because this rider is assigned to them;
-    // that caused old accepted deliveries to reappear as offer popups.
+    // Fetch active unassigned/pending orders along with restaurant coordinates
     const query = `
-      SELECT o.*,
-             COALESCE(r.name, 'Main Kitchen') AS restaurant_name,
+      SELECT o.*, 
+             COALESCE(r.name, 'Main Kitchen') AS restaurant_name, 
              r.address AS restaurant_address,
              r.latitude AS restaurant_latitude,
-             r.longitude AS restaurant_longitude,
-             oro.status AS offer_status,
-             oro.offered_at
-      FROM order_rider_offers oro
-      JOIN orders o ON o.id = oro.order_id
+             r.longitude AS restaurant_longitude
+      FROM orders o
       LEFT JOIN restaurants r ON o.restaurant_id = r.id
-      WHERE oro.rider_id = $1
-        AND oro.status = 'offered'
-        AND o.status = 'Pending'
-        AND o.rider_id IS NULL
-      ORDER BY oro.offered_at DESC
-      LIMIT 20;
+      WHERE (o.rider_id = $1 OR o.status = 'Pending') 
+        AND o.status NOT IN ('Delivered', 'Cancelled')
+      ORDER BY o.id DESC;
     `;
 
-    const result = await pool.query(query, [cleanDriverId]);
+    const result = await pool.query(query, [validDriverId]);
+
     if (result.rows.length === 0) {
       return res.status(200).json({ success: true, data: null });
     }
 
+    // Radius Filter: Max 15 km from restaurant
+    const MAX_RADIUS_KM = 15;
     const driverLat = parseFloat(lat);
     const driverLng = parseFloat(lng);
-    const MAX_RADIUS_KM = parseFloat(process.env.RIDER_SEARCH_RADIUS_KM || '10');
 
     let matchingOrder = null;
 
@@ -998,14 +972,16 @@ app.get('/api/orders/pending-offers', async (req, res) => {
       const restLat = parseFloat(order.restaurant_latitude);
       const restLng = parseFloat(order.restaurant_longitude);
 
-      if (Number.isFinite(driverLat) && Number.isFinite(driverLng) &&
-          Number.isFinite(restLat) && Number.isFinite(restLng)) {
-        const R = 6371;
+      // If driver coordinates & restaurant coordinates exist, calculate distance
+      if (!isNaN(driverLat) && !isNaN(driverLng) && !isNaN(restLat) && !isNaN(restLng)) {
+        // Haversine formula distance calculation
+        const R = 6371; // Earth radius in km
         const dLat = (restLat - driverLat) * (Math.PI / 180);
         const dLng = (restLng - driverLng) * (Math.PI / 180);
-        const a = Math.sin(dLat / 2) ** 2 +
-          Math.cos(driverLat * (Math.PI / 180)) * Math.cos(restLat * (Math.PI / 180)) *
-          Math.sin(dLng / 2) ** 2;
+        const a = 
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(driverLat * (Math.PI / 180)) * Math.cos(restLat * (Math.PI / 180)) * 
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distanceKm = R * c;
 
@@ -1014,8 +990,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
           break;
         }
       } else {
-        // The offer was already targeted to this rider by the backend, so
-        // coordinates are optional for the fallback REST recovery path.
+        // Fallback: If coordinates aren't supplied, return the latest pending order
         matchingOrder = order;
         break;
       }
@@ -1034,7 +1009,7 @@ app.get('/api/orders/pending-offers', async (req, res) => {
         restaurantAddress: matchingOrder.restaurant_address || 'Main Kitchen Location',
         deliveryAddress: matchingOrder.delivery_address || 'Customer Location',
         earnings: `₹${Math.round((matchingOrder.final_total || 0) * 0.2) || 65}`,
-        pickupDistance: matchingOrder.distanceKm ? `${matchingOrder.distanceKm} km` : 'Nearby',
+        pickupDistance: matchingOrder.distanceKm ? `${matchingOrder.distanceKm} km` : '1.2 km',
         dropDistance: '3.5 km',
         lat: matchingOrder.delivery_latitude,
         lng: matchingOrder.delivery_longitude
