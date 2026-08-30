@@ -3,7 +3,6 @@ const {
   updateDriverLocation, 
   removeDriverLocation 
 } = require('./services/deliveryService');
-const { pool } = require('./db');
 
 let io;
 
@@ -36,110 +35,41 @@ const initSocket = (server) => {
       console.log(`Socket ${socket.id} joined room ${roomName}`);
     });
 
-    // 2. Register Rider / Driver into personal notification rooms & sync state
-    socket.on('register_rider', async (data) => {
-      const activeId = typeof data === 'object' ? (data.riderId || data.driverId) : data;
-      if (!activeId) return;
+    // 2. Register Rider / Driver into personal notification rooms
+   socket.on('register_rider', ({ riderId, driverId }) => {
+  const activeId = riderId || driverId;
+  if (!activeId) return;
 
-      const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
-      const numericId = parseInt(cleanId, 10);
-      currentDriverId = cleanId;
+  const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+  currentDriverId = cleanId;
 
-      activeDriverSockets.set(cleanId, socket.id);
+  activeDriverSockets.set(cleanId, socket.id);
 
-      socket.join('active_riders');
-      socket.join(`driver_${cleanId}`);
-      socket.join(`rider_${cleanId}`);
+  socket.join('active_riders');
+  socket.join(`driver_${cleanId}`);
+  socket.join(`rider_${cleanId}`);
 
-      console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
-
-      // Active Delivery Sync: Check if rider is currently executing an active order
-      if (!isNaN(numericId)) {
-        try {
-          const activeOrderRes = await pool.query(
-            `SELECT * FROM orders WHERE rider_id = $1 AND status NOT IN ('Delivered', 'Cancelled') LIMIT 1`,
-            [numericId]
-          );
-
-          if (activeOrderRes.rows.length > 0) {
-            socket.emit('active_order_sync', activeOrderRes.rows[0]);
-          }
-        } catch (syncErr) {
-          console.error(`[SYNC ERROR] Rider ${cleanId}:`, syncErr.message);
-        }
-      }
-    });
+  console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+  console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
+});
 
     // 3. Receive live coordinates from Simulator or Rider App
-    socket.on('send_rider_location', async (data) => {
-      const { driverId, riderId, lat, lng } = data;
-      const targetDriverId = driverId || riderId || currentDriverId;
-      const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
+socket.on('send_rider_location', async (data) => {
+  const { driverId, riderId, lat, lng } = data;
+  const targetDriverId = driverId || riderId || currentDriverId;
+  const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
 
-      console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
+  console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
 
-      try {
-        await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
-        console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
-      } catch (err) {
-        console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
-      }
+  try {
+    await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
+    console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
+  } catch (err) {
+    console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
+  }
     });
 
-    // 4. Handle Rider Order Acceptance via WebSockets
-    socket.on('accept_order', async (data) => {
-      console.log('📥 [SOCKET ACCEPT] Received accept_order payload:', data);
-      const { orderId, riderId, driverId } = data || {};
-      const activeRiderId = riderId || driverId;
-
-      if (!orderId || !activeRiderId) {
-        return socket.emit('order_accept_error', { message: 'Missing orderId or riderId' });
-      }
-
-      const cleanRiderId = parseInt(String(activeRiderId).replace(/^(driver_|rider_)/, ''), 10);
-
-      try {
-        // Atomic DB Update: Assign order ONLY if status is still Pending
-// Replace the UPDATE query inside accept_order:
-const updateRes = await pool.query(
-  `UPDATE orders 
-   SET rider_id = $1, status = 'Accepted' 
-   WHERE id = $2 
-     AND (status IN ('Pending', 'Placed', 'Paid', 'Created') OR status IS NULL)
-     AND (rider_id IS NULL OR rider_id = $1)
-   RETURNING *`,
-  [cleanRiderId, orderId]
-);
-
-        if (updateRes.rows.length === 0) {
-          console.warn(`⚠️ Order ${orderId} already taken or not pending.`);
-          return socket.emit('order_accept_error', { 
-            message: 'Order was already accepted by another rider or cancelled.' 
-          });
-        }
-
-        const updatedOrder = updateRes.rows[0];
-
-        // Clear pending offer statuses in tracking matrix
-        await pool.query(
-          `UPDATE order_rider_offers SET status = 'accepted', responded_at = NOW() WHERE order_id = $1 AND rider_id = $2`,
-          [orderId, cleanRiderId]
-        ).catch(() => {});
-
-        // Confirm acceptance back to the rider
-        socket.emit('order_accepted_success', updatedOrder);
-
-        // Broadcast live status update to customer tracking room
-        io.to(`order_${orderId}`).emit('order_status_update', updatedOrder);
-        
-        console.log(`✅ Order ${orderId} successfully assigned to Rider ${cleanRiderId}`);
-      } catch (err) {
-        console.error('Error in accept_order socket handler:', err.message);
-        socket.emit('order_accept_error', { message: 'Server error accepting order' });
-      }
-    });
-
-    // 5. Express Rider Offline status explicitly
+    // 4. Express Rider Offline status explicitly
     socket.on('driver_offline', async ({ driverId, riderId }) => {
       const idToRemove = driverId || riderId || currentDriverId;
       if (idToRemove) {
@@ -155,14 +85,14 @@ const updateRes = await pool.query(
       }
     });
 
-    // 6. Leave Order Room
+    // 5. Leave Order Room
     socket.on('leave_trial_room', ({ orderId }) => {
       const roomName = `order_${orderId}`;
       socket.leave(roomName);
       console.log(`Socket ${socket.id} left room ${roomName}`);
     });
 
-    // 7. Cleanup on Disconnect (Safe Grace Period)
+    // 6. Cleanup on Disconnect (Safe Grace Period)
     socket.on('disconnect', async () => {
       console.log(`[Socket Disconnected]: ${socket.id}`);
 
