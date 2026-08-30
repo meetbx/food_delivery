@@ -4,7 +4,7 @@ const {
   removeDriverLocation 
 } = require('./services/deliveryService');
 // At the top of backend/socket.js
-const pool = require('./db'); // Adjust path if your DB config file is located elsewhere (e.g., './config/db')
+const { pool } = require('./db');// Adjust path if your DB config file is located elsewhere (e.g., './config/db')
 
 let io;
 
