@@ -547,7 +547,8 @@ app.post('/api/orders', async (req, res) => {
       items,
       cart
     } = req.body;
-
+console.log('--- [ORDER DEBUG START] ---');
+console.log('1. Received Order Body:', req.body);
     // 1. Resolve User ID (accepts user_id or userId)
     const activeUserId = user_id || userId || null;
 
@@ -695,8 +696,12 @@ app.post('/api/orders', async (req, res) => {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
             const SEARCH_RADIUS_KM = 200;
+            console.log(`2. Querying Redis for drivers near Pickup (Lat: ${restLat}, Lng: ${restLng}) with 200km radius...`);
 
-            nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
+const nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
+
+console.log('3. Nearby Drivers Result from Redis/Postgres:', JSON.stringify(nearbyDrivers));
+           
           }
         }
       } catch (geoErr) {
