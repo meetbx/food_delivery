@@ -811,18 +811,23 @@ app.get('/api/admin/orders', async (req, res) => {
 });
 
 // PATCH /api/orders/:id/status (Update Order Status)
+// backend/server.js (PATCH /api/orders/:id/status)
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, rider_id } = req.body;
 
     if (!status) {
       return res.status(400).json({ message: 'Status is required' });
     }
 
     const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *;',
-      [status, id]
+      `UPDATE orders 
+       SET status = $1, 
+           rider_id = COALESCE($2, rider_id) 
+       WHERE id = $3 
+       RETURNING *;`,
+      [status, rider_id || null, id]
     );
 
     if (result.rows.length === 0) {
