@@ -21,7 +21,10 @@ const initSocket = (server) => {
       origin: '*',
       methods: ['GET', 'POST']
     },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    // Fix: Increase timeout limits so Render proxy doesn't drop idle connections
+    pingTimeout: 30000,   // Wait up to 30s before considering socket disconnected
+    pingInterval: 10000   // Send ping every 10s to keep connection alive
   });
 
   io.on('connection', (socket) => {
@@ -46,8 +49,7 @@ const initSocket = (server) => {
 
       currentDriverId = cleanId;
 
-      // If this rider already has another socket, remove that socket's personal
-      // rooms. This guarantees one active notification connection per rider.
+      // If this rider already has another socket, remove that socket's personal rooms
       const previousSocketId = activeDriverSockets.get(cleanId);
       if (previousSocketId && previousSocketId !== socket.id) {
         const previousSocket = io.sockets.sockets.get(previousSocketId);
@@ -100,6 +102,7 @@ const initSocket = (server) => {
       }
 
       try {
+        await removeDriverLocation(cleanId);
         await removeDriverLocation(`driver_${cleanId}`);
         await removeDriverLocation(`rider_${cleanId}`);
       } catch (err) {
@@ -129,6 +132,8 @@ const initSocket = (server) => {
         activeDriverSockets.delete(cleanId);
 
         try {
+          // Fix: Ensure bare ID is removed alongside prefixed keys in Redis
+          await removeDriverLocation(cleanId);
           await removeDriverLocation(`driver_${cleanId}`);
           await removeDriverLocation(`rider_${cleanId}`);
           console.log(`[REDIS CLEANUP] Rider ${cleanId} removed after disconnect`);
