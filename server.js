@@ -751,6 +751,10 @@ console.log('3. Nearby Drivers Result from Redis/Postgres:', JSON.stringify(near
 
             const driverRoom = `driver_${cleanId}`;
             const riderRoom = `rider_${cleanId}`;
+            const roomSockets = io.sockets.adapter.rooms.get(driverRoom);
+    const count = roomSockets ? roomSockets.size : 0;
+    
+    console.log(`3. Target Room: "${driverRoom}" | Active Sockets Connected: ${count}`);
 
             io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
             io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
