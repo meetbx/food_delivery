@@ -1,154 +1,135 @@
 const { Server } = require('socket.io');
-const {
-  updateDriverLocation,
-  removeDriverLocation
+const { 
+  updateDriverLocation, 
+  removeDriverLocation 
 } = require('./services/deliveryService');
 
 let io;
 
-// riderId -> current socket.id
+// Active tracking map: driverId -> current socket.id
 const activeDriverSockets = new Map();
 
-const cleanRiderId = (value) => {
-  if (value === null || value === undefined) return null;
-  const cleaned = String(value).replace(/^(driver_|rider_)/, '').trim();
-  return /^\d+$/.test(cleaned) && Number(cleaned) > 0 ? cleaned : null;
-};
-
+/**
+ * Initializes Socket.IO on the HTTP server
+ * @param {Object} server - Node.js HTTP Server instance
+ */
 const initSocket = (server) => {
   io = new Server(server, {
     cors: {
-      origin: '*',
-      methods: ['GET', 'POST']
+      origin: '*', // Allows local testing across frontend ports (e.g. 5173 / 3000)
+      methods: ['GET', 'POST'],
     },
-    transports: ['websocket', 'polling'],
-    // Fix: Increase timeout limits so Render proxy doesn't drop idle connections
-    pingTimeout: 30000,   // Wait up to 30s before considering socket disconnected
-    pingInterval: 10000   // Send ping every 10s to keep connection alive
   });
 
   io.on('connection', (socket) => {
     console.log(`[Socket Connected]: ${socket.id}`);
 
+    // Map to track active driver ID associated with this socket connection
     let currentDriverId = null;
 
-    socket.on('join_trial_room', ({ orderId } = {}) => {
+    // 1. Join Order Room for trial/order tracking
+    socket.on('join_trial_room', ({ orderId }) => {
       if (!orderId) return;
       const roomName = `order_${orderId}`;
       socket.join(roomName);
-      console.log(`[ORDER ROOM] ${socket.id} -> ${roomName}`);
+      console.log(`Socket ${socket.id} joined room ${roomName}`);
     });
 
-    socket.on('register_rider', ({ riderId, driverId } = {}) => {
-      const cleanId = cleanRiderId(riderId ?? driverId);
+    // 2. Register Rider / Driver into personal notification rooms
+   socket.on('register_rider', ({ riderId, driverId }) => {
+  const activeId = riderId || driverId;
+  if (!activeId) return;
 
-      if (!cleanId) {
-        console.warn(`[REGISTER SKIP] Invalid rider ID from socket ${socket.id}:`, { riderId, driverId });
-        return;
-      }
+  const cleanId = String(activeId).replace(/^(driver_|rider_)/, '');
+  currentDriverId = cleanId;
 
-      currentDriverId = cleanId;
+  activeDriverSockets.set(cleanId, socket.id);
 
-      // If this rider already has another socket, remove that socket's personal rooms
-      const previousSocketId = activeDriverSockets.get(cleanId);
-      if (previousSocketId && previousSocketId !== socket.id) {
-        const previousSocket = io.sockets.sockets.get(previousSocketId);
-        if (previousSocket) {
-          previousSocket.leave(`active_riders`);
-          previousSocket.leave(`driver_${cleanId}`);
-          previousSocket.leave(`rider_${cleanId}`);
-          previousSocket.emit('duplicate_rider_connection', { riderId: Number(cleanId) });
-          console.log(`[SOCKET REPLACED] Rider ${cleanId}: ${previousSocketId} -> ${socket.id}`);
-        }
-      }
+  socket.join('active_riders');
+  socket.join(`driver_${cleanId}`);
+  socket.join(`rider_${cleanId}`);
 
-      activeDriverSockets.set(cleanId, socket.id);
-      socket.join('active_riders');
-      socket.join(`driver_${cleanId}`);
-      socket.join(`rider_${cleanId}`);
+  console.log(`[REGISTER DEBUG] Socket ${socket.id} joined rooms: driver_${cleanId}, rider_${cleanId}`);
+  console.log(`[ROOM MEMBERSHIP] Active rooms for socket ${socket.id}:`, Array.from(socket.rooms));
+});
 
-      console.log(`[REGISTER] Socket ${socket.id} registered rider ${cleanId}`);
-      console.log(`[ROOMS]`, Array.from(socket.rooms));
+    // 3. Receive live coordinates from Simulator or Rider App
+socket.on('send_rider_location', async (data) => {
+  const { driverId, riderId, lat, lng } = data;
+  const targetDriverId = driverId || riderId || currentDriverId;
+  const cleanId = String(targetDriverId).replace(/^(driver_|rider_)/, '');
+
+  console.log(`[LOCATION INCOMING] Driver ${cleanId} sent coords -> Lat: ${lat}, Lng: ${lng}`);
+
+  try {
+    await updateDriverLocation(cleanId, parseFloat(lng), parseFloat(lat));
+    console.log(`[REDIS SUCCESS] Driver ${cleanId} location updated in Redis spatial index.`);
+  } catch (err) {
+    console.error(`[REDIS ERROR] Failed to update location for Driver ${cleanId}:`, err.message);
+  }
     });
 
-    socket.on('send_rider_location', async (data = {}) => {
-      const targetDriverId = cleanRiderId(data.driverId ?? data.riderId ?? currentDriverId);
-      const lat = parseFloat(data.lat);
-      const lng = parseFloat(data.lng);
-
-      if (!targetDriverId) {
-        console.warn(`[LOCATION SKIP] Socket ${socket.id} has no valid rider ID`);
-        return;
-      }
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        console.warn(`[LOCATION SKIP] Invalid coordinates from rider ${targetDriverId}`);
-        return;
-      }
-
-      try {
-        await updateDriverLocation(targetDriverId, lng, lat);
-      } catch (err) {
-        console.error(`[REDIS ERROR] Driver ${targetDriverId}:`, err.message);
-      }
-    });
-
-    socket.on('driver_offline', async ({ driverId, riderId } = {}) => {
-      const cleanId = cleanRiderId(driverId ?? riderId ?? currentDriverId);
-      if (!cleanId) return;
-
-      if (activeDriverSockets.get(cleanId) === socket.id) {
+    // 4. Express Rider Offline status explicitly
+    socket.on('driver_offline', async ({ driverId, riderId }) => {
+      const idToRemove = driverId || riderId || currentDriverId;
+      if (idToRemove) {
+        const cleanId = String(idToRemove).replace(/^(driver_|rider_)/, '');
         activeDriverSockets.delete(cleanId);
-      }
-
-      try {
-        await removeDriverLocation(cleanId);
-        await removeDriverLocation(`driver_${cleanId}`);
-        await removeDriverLocation(`rider_${cleanId}`);
-      } catch (err) {
-        console.error(`[OFFLINE ERROR] Rider ${cleanId}:`, err.message);
-      }
-    });
-
-    socket.on('leave_trial_room', ({ orderId } = {}) => {
-      if (!orderId) return;
-      socket.leave(`order_${orderId}`);
-    });
-
-    socket.on('disconnect', async (reason) => {
-      console.log(`[Socket Disconnected]: ${socket.id} | ${reason}`);
-
-      if (!currentDriverId) return;
-
-      const cleanId = currentDriverId;
-      const disconnectedSocketId = socket.id;
-
-      // Do not remove the rider from Redis if a new socket has already replaced it.
-      setTimeout(async () => {
-        if (activeDriverSockets.get(cleanId) !== disconnectedSocketId) {
-          return;
-        }
-
-        activeDriverSockets.delete(cleanId);
-
         try {
-          // Fix: Ensure bare ID is removed alongside prefixed keys in Redis
-          await removeDriverLocation(cleanId);
           await removeDriverLocation(`driver_${cleanId}`);
           await removeDriverLocation(`rider_${cleanId}`);
-          console.log(`[REDIS CLEANUP] Rider ${cleanId} removed after disconnect`);
+          console.log(`Driver ${cleanId} marked offline in Redis`);
         } catch (err) {
-          console.error(`[REDIS CLEANUP ERROR] Rider ${cleanId}:`, err.message);
+          console.error(`Error removing driver ${cleanId} from Redis:`, err.message);
         }
-      }, 5000);
+      }
+    });
+
+    // 5. Leave Order Room
+    socket.on('leave_trial_room', ({ orderId }) => {
+      const roomName = `order_${orderId}`;
+      socket.leave(roomName);
+      console.log(`Socket ${socket.id} left room ${roomName}`);
+    });
+
+    // 6. Cleanup on Disconnect (Safe Grace Period)
+    socket.on('disconnect', async () => {
+      console.log(`[Socket Disconnected]: ${socket.id}`);
+
+      if (currentDriverId) {
+        const cleanId = String(currentDriverId).replace(/^(driver_|rider_)/, '');
+        const disconnectedSocketId = socket.id;
+
+        // Grace period: Wait 5 seconds before removing from Redis
+        setTimeout(async () => {
+          // CRITICAL FIX: Only remove if driver HAS NOT reconnected with a new socket
+          if (activeDriverSockets.get(cleanId) === disconnectedSocketId) {
+            activeDriverSockets.delete(cleanId);
+            try {
+              await removeDriverLocation(`driver_${cleanId}`);
+              await removeDriverLocation(`rider_${cleanId}`);
+              console.log(`Removed disconnected driver ${cleanId} from Redis spatial index`);
+            } catch (err) {
+              console.error(`Failed cleanup for driver ${cleanId}:`, err.message);
+            }
+          } else {
+            console.log(`Driver ${cleanId} reconnected on a new socket. Preserved in Redis.`);
+          }
+        }, 5000);
+      }
     });
   });
 
   return io;
 };
 
+/**
+ * Getter to access the initialized Socket.IO instance elsewhere in the backend
+ */
 const getIo = () => {
-  if (!io) throw new Error('Socket.io has not been initialized!');
+  if (!io) {
+    throw new Error('Socket.io has not been initialized!');
+  }
   return io;
 };
 
