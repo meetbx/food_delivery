@@ -694,7 +694,7 @@ app.post('/api/orders', async (req, res) => {
           if (latitude !== null && longitude !== null) {
             const restLat = parseFloat(latitude);
             const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 10;
+            const SEARCH_RADIUS_KM = 200;
 
             nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
           }
