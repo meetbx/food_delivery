@@ -759,8 +759,7 @@ console.log('3. Nearby Drivers Result from Redis/Postgres:', JSON.stringify(near
             io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
             io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
 // REMOVE OR FIX THESE TWO LINES IN YOUR LOOP:
-console.log(`4. Emitting 'new_order_offer' to Room: ${targetRoom} (Active Sockets in room: ${socketCount})`);
-io.to(targetRoom).emit('new_order_offer', orderOfferPayload);
+
           }
         } else {
           console.log('⚠️ [FAIL REASON] No available drivers found within radius/status check.');
