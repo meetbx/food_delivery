@@ -754,9 +754,11 @@ console.log('3. Nearby Drivers Result from Redis/Postgres:', JSON.stringify(near
 
             io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
             io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
+            console.log(`4. Emitting 'new_order_offer' to Room: ${targetRoom} (Active Sockets in room: ${socketCount})`);
+    io.to(targetRoom).emit('new_order_offer', orderOfferPayload);
           }
         } else {
-          console.log('⚠️ No specific drivers found in geo-radius.');
+          console.log('⚠️ [FAIL REASON] No available drivers found within radius/status check.');
         }
         
 /*        console.log(`📍 [ORDER CREATED] Order ID: ${newOrder.id}`);
