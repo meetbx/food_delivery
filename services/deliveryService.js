@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { redis, pool } = require('../db'); // Destructure both redis and pool properly
+const { redis } = require('../db'); // Import the exported Redis instance from your db.js
 
 const DRIVER_GEO_KEY = 'drivers:locations';
 
@@ -28,8 +28,7 @@ async function updateDriverLocation(driverId, longitude, latitude) {
 }
 
 /**
- * Finds drivers near a specific location within a given radius (in km)
- * and filters out drivers who currently have active (undelivered) orders.
+ * Finds drivers near a specific location within a given radius (in km).
  */
 async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
   const lng = parseFloat(longitude);
@@ -48,35 +47,10 @@ async function findNearbyDrivers(longitude, latitude, radiusKm = 5) {
     'ASC'
   );
 
-  if (!nearbyDrivers || nearbyDrivers.length === 0) return [];
-
-  // Extract raw driver IDs
-  const candidateIds = nearbyDrivers.map(([driverId]) => {
-    return parseInt(String(driverId).replace(/^(driver_|rider_)/, ''), 10);
-  }).filter(id => !isNaN(id));
-
-  if (candidateIds.length === 0) return [];
-
-  // Query PostgreSQL: Filter out drivers who are already on active orders
-  const activeRidersQuery = `
-    SELECT DISTINCT rider_id 
-    FROM orders 
-    WHERE rider_id = ANY($1::int[]) 
-      AND status NOT IN ('Delivered', 'Cancelled')
-  `;
-  const activeRes = await pool.query(activeRidersQuery, [candidateIds]);
-  const busyRiderIds = new Set(activeRes.rows.map(r => r.rider_id));
-
-  console.log('  -> [GEOSEARCH LOG] Raw Redis drivers found:', nearbyDrivers);
-  console.log('  -> [BUSY CHECK] Busy Rider IDs in Postgres:', Array.from(busyRiderIds));
-
-  // Filter out busy drivers and return available ones
-  return nearbyDrivers
-    .map(([driverId, distance]) => ({
-      driverId: String(driverId).replace(/^(driver_|rider_)/, ''),
-      distanceKm: parseFloat(distance)
-    }))
-    .filter(item => !busyRiderIds.has(parseInt(item.driverId, 10)));
+  return nearbyDrivers.map(([driverId, distance]) => ({
+    driverId,
+    distanceKm: parseFloat(distance)
+  }));
 }
 
 /**
