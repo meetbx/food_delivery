@@ -15,6 +15,7 @@ const {
   getEstimatedDeliveryTime,
   findDriversNearRestaurant // Optional helper, or use findNearbyDrivers directly
 } = require('./services/deliveryService');
+const { dispatchNextRider } = require('./socket');
 
 const trialOrderRouter = require('./routes/trialOrder');
 const http = require('http');
@@ -742,33 +743,9 @@ nearbyDrivers.forEach((driver) => {
   io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
 });
 
-          // Fallback broadcast to ensure all online drivers receive the offer
-        //  io.to('active_riders').emit('new_order_offer', orderOfferPayload);
         } else {
           console.log('⚠️ No specific drivers found in geo-radius.');
-        }
-        
-/*        console.log(`📍 [ORDER CREATED] Order ID: ${newOrder.id}`);
-console.log(`📍 [RESTAURANT COORDS] Lat: ${fetchedLat}, Lng: ${fetchedLng}`);
-console.log(`🔍 [REDIS SEARCH RESULT] nearbyDrivers:`, nearbyDrivers);
-
-if (nearbyDrivers && nearbyDrivers.length > 0) {
-  nearbyDrivers.forEach((driverId) => {
-    const cleanId = String(driverId).replace(/^(driver_|rider_)/, '');
-    
-    const driverRoom = io.sockets.adapter.rooms.get(`driver_${cleanId}`);
-    const riderRoom = io.sockets.adapter.rooms.get(`rider_${cleanId}`);
-
-    console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
-    console.log(`   ├─ Sockets in 'driver_${cleanId}': ${driverRoom ? driverRoom.size : 0}`);
-    console.log(`   └─ Sockets in 'rider_${cleanId}': ${riderRoom ? riderRoom.size : 0}`);
-  });
-} else {
-  console.log(`⚠️ [GEO FAIL] No drivers found within radius of Lat: ${fetchedLat}, Lng: ${fetchedLng}`);
-}
-        */
-
-        
+        }        
       }
     } catch (socketErr) {
       console.error('⚠️ Socket dispatch error:', socketErr.message);
