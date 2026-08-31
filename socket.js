@@ -143,19 +143,23 @@ const initSocket = (server) => {
     socket.on('join_order_room', joinOrder);
     socket.on('join_trial_room', joinOrder);
 
-    socket.on('register_rider', ({ riderId, driverId }) => {
-      const id = cleanId(riderId || driverId);
-      if (!id) return;
-      currentDriverId = id;
-      activeDriverSockets.set(id, socket.id);
-      // Set rider status to idle if they aren't on an active delivery
-   pool.query("UPDATE riders SET status = 'idle' WHERE id = $1 AND status <> 'delivering'", [id]);
-        console.error('[ONLINE STATUS ERROR]', err.message)
-      );
-      socket.join('active_riders');
-      socket.join(`driver_${id}`);
-      socket.join(`rider_${id}`);
-    });
+socket.on('register_rider', async ({ riderId, driverId }) => {
+  const id = cleanId(riderId || driverId);
+  if (!id) return;
+  currentDriverId = id;
+  activeDriverSockets.set(id, socket.id);
+
+  try {
+    // Set rider status to idle if they aren't on an active delivery
+    await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1 AND status <> 'delivering'", [id]);
+  } catch (err) {
+    console.error('[ONLINE STATUS ERROR]', err.message);
+  }
+
+  socket.join('active_riders');
+  socket.join(`driver_${id}`);
+  socket.join(`rider_${id}`);
+});
 
     socket.on('send_rider_location', async (data = {}) => {
       const id = cleanId(data.driverId || data.riderId || currentDriverId);
