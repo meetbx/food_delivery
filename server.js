@@ -764,7 +764,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
   try {
     // 1. Standard status update query
-    const result = await db.query(
+    const result = await pool.query(
       'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
       [status, id]
     );
