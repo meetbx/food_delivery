@@ -15,11 +15,10 @@ const {
   getEstimatedDeliveryTime,
   findDriversNearRestaurant // Optional helper, or use findNearbyDrivers directly
 } = require('./services/deliveryService');
-const { dispatchNextRider } = require('./socket');
 
 const trialOrderRouter = require('./routes/trialOrder');
 const http = require('http');
-const { initSocket, getIo } = require('./socket');
+const { initSocket, getIo , dispatchNextRider } = require('./socket');
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
@@ -676,80 +675,19 @@ app.post('/api/orders', async (req, res) => {
     }
 
     // 6. REDIS GEO & REAL-TIME SOCKET DISPATCH TO RIDERS
-    let nearbyDrivers = [];
-    let restaurantLocation = null;
-    let restaurantName = 'Main Kitchen';
-
-    if (restaurant_id) {
-      try {
-        const restResult = await pool.query(
-          'SELECT latitude, longitude, name FROM restaurants WHERE id = $1',
-          [Number(restaurant_id)]
-        );
-
-        if (restResult.rows.length > 0) {
-          const { latitude, longitude, name } = restResult.rows[0];
-          restaurantLocation = { latitude, longitude, name };
-          if (name) restaurantName = name;
-
-          if (latitude !== null && longitude !== null) {
-            const restLat = parseFloat(latitude);
-            const restLng = parseFloat(longitude);
-            const SEARCH_RADIUS_KM = 200;
-
-            nearbyDrivers = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
-          }
-        }
-      } catch (geoErr) {
-        console.error('⚠️ Redis Geo driver match failed:', geoErr.message);
-      }
-    }
-
-    // Emit live order offers to Rider Dashboard via WebSockets
-// Emit live order offers to Rider Dashboard via WebSockets
+// 6. SEQUENTIAL DISPATCH TO RIDERS (ONE BY ONE VIA REDIS + SOCKETS)
     try {
-      const io = getIo();
-      if (io) {
-        const orderOfferPayload = {
-          orderId: newOrder.id,
-          id: newOrder.id,
-          restaurant: restaurantName,
-          restaurantAddress: restaurantLocation ? `${restaurantName} Branch` : 'Main Kitchen Location',
-          deliveryAddress: newOrder.delivery_address || 'Customer Location',
-          earnings: `₹${Math.round(calcTotal * 0.2) || 65}`,
-          pickupDistance: '1.2 km',
-          dropDistance: '3.5 km',
-          itemsCount: Array.isArray(rawItems) ? rawItems.length : 1,
-          lat: fetchedLat,
-          lng: fetchedLng,
-          roomName: `order_${newOrder.id}`
-        };
-
-        if (nearbyDrivers && nearbyDrivers.length > 0) {
-          console.log(`📡 Emitting offer targeted to ${nearbyDrivers.length} drivers for Order ${newOrder.id}`);
-
-nearbyDrivers.forEach((driver) => {
-  // Extract driverId if driver is an object, otherwise use driver directly
-  const rawId = typeof driver === 'object' ? (driver.driverId || driver.id) : driver;
-  const cleanId = String(rawId).replace(/^(driver_|rider_)/, '');
-
-  const driverRoom = `driver_${cleanId}`;
-  const riderRoom = `rider_${cleanId}`;
-
-  console.log(`📡 [EMIT TARGET] Driver ID: ${cleanId}`);
-
-  // Emit to driver room and rider room individually
-  io.to(driverRoom).emit('new_order_offer', orderOfferPayload);
-  io.to(riderRoom).emit('new_order_offer', orderOfferPayload);
-});
-
-        } else {
-          console.log('⚠️ No specific drivers found in geo-radius.');
-        }        
+      const assignedRiderId = await dispatchNextRider(newOrder.id);
+      if (assignedRiderId) {
+        console.log(`📡 Order ${newOrder.id} dispatched to initial rider ${assignedRiderId}`);
+      } else {
+        console.log(`⚠️ No eligible idle riders found in radius for order ${newOrder.id}`);
       }
     } catch (socketErr) {
       console.error('⚠️ Socket dispatch error:', socketErr.message);
     }
+
+
 
     // 7. Return Order details
     res.status(201).json({
