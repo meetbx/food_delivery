@@ -276,10 +276,48 @@ const initSocket = (server) => {
       await dispatchNextRider(orderId, [id]);
     });
 
-    socket.on('complete_delivery', async ({ riderId, orderId }) => {
-      const id = cleanId(riderId || currentDriverId);
-      await pool.query("UPDATE orders SET status = 'Delivered' WHERE id = $1", [orderId]);
-      await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1", [id]);
+socket.on('complete_delivery', async ({ riderId, driverId, orderId } = {}) => {
+      // 1. Resolve clean driver ID from payload or fallback to socket session
+      const id = cleanId(riderId || driverId || currentDriverId);
+
+      if (!id || !orderId) {
+        console.warn('⚠️ [COMPLETE DELIVERY FAIL] Missing orderId or riderId payload');
+        return;
+      }
+
+      try {
+        // 2. Mark order as Delivered
+        await pool.query(
+          "UPDATE orders SET status = 'Delivered' WHERE id = $1",
+          [orderId]
+        );
+
+        // 3. Reset rider status back to 'idle' in DB
+        const riderRes = await pool.query(
+          "UPDATE riders SET status = 'idle' WHERE id = $1 RETURNING id, status",
+          [id]
+        );
+
+        if (riderRes.rows.length > 0) {
+          console.log(`✅ [DELIVERY COMPLETED] Order ${orderId} marked Delivered. Rider ${id} status set to 'idle'.`);
+        } else {
+          console.warn(`⚠️ [STATUS WARN] Could not find Rider ${id} in riders table.`);
+        }
+
+        // 4. Notify rider client that completion was successful
+        socket.emit('delivery_completed_success', { orderId: Number(orderId) });
+
+        // 5. Trigger dispatch check for any queued pending orders
+        const pending = await pool.query(
+          "SELECT id FROM orders WHERE status = 'Pending' AND rider_id IS NULL ORDER BY id ASC LIMIT 1"
+        );
+        if (pending.rows.length > 0) {
+          await dispatchNextRider(pending.rows[0].id);
+        }
+
+      } catch (err) {
+        console.error('❌ [COMPLETE DELIVERY ERROR]:', err.message);
+      }
     });
 
     socket.on('driver_offline', async ({ driverId, riderId } = {}) => {
