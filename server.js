@@ -654,7 +654,7 @@ app.post('/api/orders', async (req, res) => {
     const orderResult = await pool.query(orderQuery, orderValues);
     const newOrder = orderResult.rows[0];
 
-    // 5. Insert order items into order_items table
+  // 5. Insert order items into order_items table
     if (Array.isArray(rawItems) && rawItems.length > 0) {
       for (const entry of rawItems) {
         try {
@@ -674,12 +674,13 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
-    // 6. REDIS GEO & REAL-TIME SOCKET DISPATCH TO RIDERS
-// 6. SEQUENTIAL DISPATCH TO RIDERS (ONE BY ONE VIA REDIS + SOCKETS)
+    // 6. REDIS GEO & REAL-TIME SEQUENTIAL DISPATCH TO RIDERS
     try {
+      // dispatchNextRider executes Redis GEOSEARCH, extracts restaurant coords,
+      // builds candidate lists, and manages 20s sequential timers internally.
       const assignedRiderId = await dispatchNextRider(newOrder.id);
       if (assignedRiderId) {
-        console.log(`📡 Order ${newOrder.id} dispatched to initial rider ${assignedRiderId}`);
+        console.log(`📡 Order ${newOrder.id} successfully offered to initial rider ${assignedRiderId}`);
       } else {
         console.log(`⚠️ No eligible idle riders found in radius for order ${newOrder.id}`);
       }
@@ -687,22 +688,14 @@ app.post('/api/orders', async (req, res) => {
       console.error('⚠️ Socket dispatch error:', socketErr.message);
     }
 
-
-
     // 7. Return Order details
     res.status(201).json({
       message: 'Order placed successfully!',
       order_id: newOrder.id,
       orderId: newOrder.id,
-      order: newOrder,
-      dispatch: {
-        restaurant: restaurantLocation,
-        searchRadiusKm: 200,
-        driversFoundCount: nearbyDrivers.length,
-        nearbyDrivers
-      }
+      order: newOrder
     });
-
+    
   } catch (error) {
     console.error('❌ Error placing order:', error);
     res.status(500).json({ message: error.message || 'Database error placing order' });
