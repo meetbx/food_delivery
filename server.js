@@ -720,7 +720,7 @@ app.get('/api/admin/orders', async (req, res) => {
 
 // PATCH /api/orders/:id/status (Update Order Status)
 // PATCH /api/orders/:id/status (Update Order Status)
-/*
+
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -756,37 +756,9 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     res.status(500).json({ message: 'Server error updating order status' });
   }
 });
-*/
 
-app.patch('/api/orders/:id/status', async (req, res) => {
-  const { id } = req.params;
-  const { status, driverId, riderId } = req.body;
 
-  try {
-    // 1. Standard status update query
-    const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
-      [status, id]
-    );
 
-    // 2. If status is Delivered, update driver status back to idle
-    if (status === 'Delivered' || status === 'DELIVERED') {
-      const rId = driverId || riderId;
-      if (rId) {
-        await db.query(
-          "UPDATE riders SET status = 'idle' WHERE id = $1",
-          [rId]
-        );
-      }
-    }
-
-    res.json({ success: true, order: result.rows[0] });
-  } catch (err) {
-    // 💡 Printing err here will reveal the exact SQL constraint issue in Render logs
-    console.error('Error updating order status in DB:', err);
-    res.status(500).json({ message: 'Server error updating order status', error: err.message });
-  }
-});
 // GET /api/orders/:id (Live Tracking Endpoint)
 const getOrderDetails = async (req, res) => {
 
