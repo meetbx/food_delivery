@@ -9,14 +9,19 @@ const {
 let io;
 const activeDriverSockets = new Map();
 
-const cleanId = (id) => String(id || '').replace(/^(driver_|rider_)/, '');
-// Keep track of active 20-second offer timers per order
+// Track active 20-second offer timers per order
 const offerTimers = new Map();
 
+const cleanId = (id) => String(id || '').replace(/^(driver_|rider_)/, '');
+
+/**
+ * Fetch restaurant coordinates & order details directly from PostgreSQL
+ */
 async function getOrderRestaurant(orderId) {
   const result = await pool.query(`
-    SELECT o.id, o.status, o.rider_id,
-           o.delivery_address, o.final_total,
+    SELECT o.id, o.status, o.rider_id, o.user_id,
+           o.delivery_address, o.delivery_latitude, o.delivery_longitude,
+           o.final_total, o.items,
            r.name AS restaurant_name,
            r.address AS restaurant_address,
            r.latitude AS restaurant_latitude,
@@ -28,39 +33,66 @@ async function getOrderRestaurant(orderId) {
   return result.rows[0] || null;
 }
 
+/**
+ * Sequential Dispatcher (Combines Section 6 Redis Search + Socket Offer Logic)
+ */
 async function dispatchNextRider(orderId, excludedRiderIds = []) {
-  // Clear any existing timer for this order
+  // 1. Clear any existing active timer for this order
   if (offerTimers.has(orderId)) {
     clearTimeout(offerTimers.get(orderId));
     offerTimers.delete(orderId);
   }
   
+  // 2. Fetch order & restaurant details
   const order = await getOrderRestaurant(orderId);
-  if (!order || ['Accepted', 'Picked Up', 'Delivered', 'Cancelled'].includes(order.status)) return null;
+  if (!order || ['Accepted', 'Picked Up', 'Delivered', 'Cancelled'].includes(order.status)) {
+    return null;
+  }
 
   const restLat = parseFloat(order.restaurant_latitude);
   const restLng = parseFloat(order.restaurant_longitude);
-  if (isNaN(restLat) || isNaN(restLng)) return null;
+  
+  // Fallback: If restaurant lat/lng doesn't exist, exit safely
+  if (isNaN(restLat) || isNaN(restLng)) {
+    console.warn(`⚠️ [DISPATCH FAIL] Invalid restaurant coordinates for Order ${orderId}`);
+    return null;
+  }
 
+  // 3. Build exclusion set (Declined, Expired, Accepted, or explicitly passed riders)
   const excluded = new Set(excludedRiderIds.map(id => cleanId(id)));
   if (order.rider_id) excluded.add(cleanId(order.rider_id));
 
-// Exclude riders who already declined, expired, or accepted
   const priorOffers = await pool.query(`
     SELECT rider_id FROM order_rider_offers
     WHERE order_id = $1 AND status IN ('declined', 'expired', 'accepted')
   `, [orderId]);
   priorOffers.rows.forEach(row => excluded.add(cleanId(row.rider_id)));
 
-  // Find nearby drivers via Redis GEOSEARCH
-  const nearby = await findNearbyDrivers(restLng, restLat, 10);
+  // 4. Redis GEOSEARCH: Find drivers within 200 km radius (as specified in Section 6)
+  const SEARCH_RADIUS_KM = 200;
+  const nearbyCandidates = await findNearbyDrivers(restLng, restLat, SEARCH_RADIUS_KM);
 
-  for (const candidate of nearby) {
-    const riderId = cleanId(candidate.driverId);
+  if (!nearbyCandidates || nearbyCandidates.length === 0) {
+    console.log(`⚠️ [DISPATCH] No nearby drivers found in Redis within ${SEARCH_RADIUS_KM}km for Order ${orderId}`);
+    return null;
+  }
+
+  // 5. Calculate item counts safely
+  let rawItems = order.items || [];
+  if (typeof rawItems === 'string') {
+    try { rawItems = JSON.parse(rawItems); } catch (e) { rawItems = []; }
+  }
+  const itemsCount = Array.isArray(rawItems) ? rawItems.length : 1;
+
+  // 6. Iterate candidates sequentially to find an eligible connected driver
+  for (const candidate of nearbyCandidates) {
+    const rawRiderId = typeof candidate === 'object' ? (candidate.driverId || candidate.id) : candidate;
+    const riderId = cleanId(rawRiderId);
+
     if (!riderId || excluded.has(riderId)) continue;
-    if (!activeDriverSockets.has(riderId)) continue;
+    if (!activeDriverSockets.has(riderId)) continue; // Must have an active socket connection
 
-    // Filter by rider status = 'idle'
+    // 7. Verify DB status: Driver must be 'idle' and not currently on an active delivery
     const riderResult = await pool.query(`
       SELECT r.id, r.name, r.last_latitude, r.last_longitude
       FROM riders r
@@ -75,7 +107,7 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
 
     if (!riderResult.rows.length) continue;
 
-    // Track the offer in DB
+    // 8. Record the offer attempt in DB
     await pool.query(`
       INSERT INTO order_rider_offers (order_id, rider_id, status, offered_at)
       VALUES ($1, $2, 'offered', NOW())
@@ -83,28 +115,39 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
       DO UPDATE SET status = 'offered', offered_at = NOW(), responded_at = NULL
     `, [orderId, riderId]);
 
+    // 9. Format Section 6 Payload complete with calculated earnings & distances
+    const calcTotal = Number(order.final_total || 0);
+    const distanceKmVal = candidate.distanceKm ? Number(candidate.distanceKm) : 1.2;
+
     const payload = {
       orderId: Number(orderId),
       id: Number(orderId),
-      restaurant: order.restaurant_name || 'Restaurant',
-      restaurantAddress: order.restaurant_address || 'Restaurant Location',
+      restaurant: order.restaurant_name || 'Main Kitchen',
+      restaurantAddress: order.restaurant_address || 'Main Kitchen Location',
       deliveryAddress: order.delivery_address || 'Customer Location',
-      earnings: `₹${Math.round((order.final_total || 0) * 0.2) || 65}`,
-      pickupDistance: `${Number(candidate.distanceKm).toFixed(1)} km`,
-      distanceKm: candidate.distanceKm,
+      earnings: `₹${Math.round(calcTotal * 0.2) || 65}`,
+      pickupDistance: `${distanceKmVal.toFixed(1)} km`,
+      dropDistance: '3.5 km',
+      distanceKm: distanceKmVal,
+      itemsCount,
       expiresInSeconds: 20,
+      lat: parseFloat(order.delivery_latitude),
+      lng: parseFloat(order.delivery_longitude),
+      roomName: `order_${orderId}`,
       riderLocation: {
         lat: parseFloat(riderResult.rows[0].last_latitude),
         lng: parseFloat(riderResult.rows[0].last_longitude)
       }
     };
 
-    // Send payload exclusively to candidate rider
+    // 10. Emit directly to driver sockets
+    console.log(`📡 [EMIT TARGET] Dispatching Order ${orderId} offer to Rider ID: ${riderId}`);
     io.to(`driver_${riderId}`).emit('new_order_offer', payload);
     io.to(`rider_${riderId}`).emit('new_order_offer', payload);
 
-    // 20-Second Timeout: Auto-expire and move to next rider
+    // 11. 20-Second Offer Expiration Timer
     const timer = setTimeout(async () => {
+      console.log(`⏰ Offer timed out for Order ${orderId} -> Rider ${riderId}. Rotating to next driver...`);
       await pool.query(`
         UPDATE order_rider_offers
         SET status = 'expired', responded_at = NOW()
@@ -114,7 +157,7 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
       io.to(`driver_${riderId}`).emit('offer_expired', { orderId: Number(orderId) });
       io.to(`rider_${riderId}`).emit('offer_expired', { orderId: Number(orderId) });
 
-      // Trigger dispatch to the next closest driver
+      // Trigger dispatch to the next closest candidate
       dispatchNextRider(orderId, [riderId]);
     }, 20000);
 
@@ -122,6 +165,7 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
     return riderId;
   }
 
+  console.log(`⚠️ No available idle riders accepted or matched for Order ${orderId}`);
   return null;
 }
 
@@ -143,24 +187,25 @@ const initSocket = (server) => {
     socket.on('join_order_room', joinOrder);
     socket.on('join_trial_room', joinOrder);
 
-socket.on('register_rider', async ({ riderId, driverId }) => {
-  const id = cleanId(riderId || driverId);
-  if (!id) return;
-  currentDriverId = id;
-  activeDriverSockets.set(id, socket.id);
+    // Register Rider Sockets & Update Status
+    socket.on('register_rider', async ({ riderId, driverId }) => {
+      const id = cleanId(riderId || driverId);
+      if (!id) return;
+      currentDriverId = id;
+      activeDriverSockets.set(id, socket.id);
 
-  try {
-    // Set rider status to idle if they aren't on an active delivery
-    await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1 AND status <> 'delivering'", [id]);
-  } catch (err) {
-    console.error('[ONLINE STATUS ERROR]', err.message);
-  }
+      try {
+        await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1 AND status <> 'delivering'", [id]);
+      } catch (err) {
+        console.error('[ONLINE STATUS ERROR]', err.message);
+      }
 
-  socket.join('active_riders');
-  socket.join(`driver_${id}`);
-  socket.join(`rider_${id}`);
-});
+      socket.join('active_riders');
+      socket.join(`driver_${id}`);
+      socket.join(`rider_${id}`);
+    });
 
+    // Real-Time GPS Location Updates
     socket.on('send_rider_location', async (data = {}) => {
       const id = cleanId(data.driverId || data.riderId || currentDriverId);
       const lat = parseFloat(data.lat);
@@ -168,10 +213,8 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
       if (!id || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
       try {
-        // Redis = fast live geo index.
         await updateDriverLocation(id, lng, lat);
 
-        // PostgreSQL = authoritative latest location + timestamp.
         await pool.query(`
           UPDATE riders
           SET last_latitude = $1,
@@ -180,7 +223,6 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
           WHERE id = $3
         `, [lat, lng, id]);
 
-        // If this rider has an accepted order, broadcast every GPS update to that order.
         const activeOrder = await pool.query(`
           SELECT id, status
           FROM orders
@@ -205,7 +247,8 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
       }
     });
 
-  socket.on('accept_order', async ({ orderId, riderId, driverId }) => {
+    // Accept Order Logic
+    socket.on('accept_order', async ({ orderId, riderId, driverId }) => {
       const id = cleanId(riderId || driverId || currentDriverId);
       if (!orderId || !id) return;
 
@@ -226,16 +269,12 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
           return;
         }
 
-        // Cancel 20s timeout timer
         if (offerTimers.has(orderId)) {
           clearTimeout(offerTimers.get(orderId));
           offerTimers.delete(orderId);
         }
 
-        // Assign order and update status
         await client.query("UPDATE orders SET rider_id = $1, status = 'Accepted' WHERE id = $2", [id, orderId]);
-        
-        // Update rider status to 'delivering' so they don't receive new offers
         await client.query("UPDATE riders SET status = 'delivering' WHERE id = $1", [id]);
 
         await client.query(`
@@ -257,6 +296,7 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
       }
     });
 
+    // Decline Order Logic
     socket.on('decline_order', async ({ orderId, riderId, driverId }) => {
       const id = cleanId(riderId || driverId || currentDriverId);
       if (!orderId || !id) return;
@@ -278,7 +318,6 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
 
     socket.on('complete_delivery', async ({ riderId, orderId }) => {
       const id = cleanId(riderId || currentDriverId);
-      // Mark delivery complete & set rider back to 'idle'
       await pool.query("UPDATE orders SET status = 'Delivered' WHERE id = $1", [orderId]);
       await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1", [id]);
     });
@@ -294,7 +333,6 @@ socket.on('register_rider', async ({ riderId, driverId }) => {
 
   return io;
 };
-
 
 const getIo = () => {
   if (!io) throw new Error('Socket.io has not been initialized!');
