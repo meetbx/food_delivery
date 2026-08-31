@@ -10,6 +10,8 @@ let io;
 const activeDriverSockets = new Map();
 
 const cleanId = (id) => String(id || '').replace(/^(driver_|rider_)/, '');
+// Keep track of active 20-second offer timers per order
+const offerTimers = new Map();
 
 async function getOrderRestaurant(orderId) {
   const result = await pool.query(`
@@ -27,6 +29,12 @@ async function getOrderRestaurant(orderId) {
 }
 
 async function dispatchNextRider(orderId, excludedRiderIds = []) {
+  // Clear any existing timer for this order
+  if (offerTimers.has(orderId)) {
+    clearTimeout(offerTimers.get(orderId));
+    offerTimers.delete(orderId);
+  }
+  
   const order = await getOrderRestaurant(orderId);
   if (!order || ['Accepted', 'Picked Up', 'Delivered', 'Cancelled'].includes(order.status)) return null;
 
@@ -37,38 +45,37 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
   const excluded = new Set(excludedRiderIds.map(id => cleanId(id)));
   if (order.rider_id) excluded.add(cleanId(order.rider_id));
 
-  // Never offer again to a rider who already declined/expired this order.
+// Exclude riders who already declined, expired, or accepted
   const priorOffers = await pool.query(`
-    SELECT rider_id
-    FROM order_rider_offers
-    WHERE order_id = $1
-      AND status IN ('declined', 'expired', 'accepted')
+    SELECT rider_id FROM order_rider_offers
+    WHERE order_id = $1 AND status IN ('declined', 'expired', 'accepted')
   `, [orderId]);
   priorOffers.rows.forEach(row => excluded.add(cleanId(row.rider_id)));
 
+  // Find nearby drivers via Redis GEOSEARCH
   const nearby = await findNearbyDrivers(restLng, restLat, 10);
 
   for (const candidate of nearby) {
     const riderId = cleanId(candidate.driverId);
     if (!riderId || excluded.has(riderId)) continue;
-
-    // Only offer to an online rider with a connected socket.
     if (!activeDriverSockets.has(riderId)) continue;
 
+    // Filter by rider status = 'idle'
     const riderResult = await pool.query(`
       SELECT r.id, r.name, r.last_latitude, r.last_longitude
       FROM riders r
       WHERE r.id = $1
-        AND r.is_online = true
+        AND r.status = 'idle'
         AND NOT EXISTS (
-          SELECT 1
-          FROM orders ao
+          SELECT 1 FROM orders ao
           WHERE ao.rider_id = r.id
             AND ao.status IN ('Accepted', 'Picked Up', 'Out for Delivery')
         )
     `, [riderId]);
+
     if (!riderResult.rows.length) continue;
 
+    // Track the offer in DB
     await pool.query(`
       INSERT INTO order_rider_offers (order_id, rider_id, status, offered_at)
       VALUES ($1, $2, 'offered', NOW())
@@ -85,19 +92,36 @@ async function dispatchNextRider(orderId, excludedRiderIds = []) {
       earnings: `₹${Math.round((order.final_total || 0) * 0.2) || 65}`,
       pickupDistance: `${Number(candidate.distanceKm).toFixed(1)} km`,
       distanceKm: candidate.distanceKm,
+      expiresInSeconds: 20,
       riderLocation: {
         lat: parseFloat(riderResult.rows[0].last_latitude),
         lng: parseFloat(riderResult.rows[0].last_longitude)
       }
     };
 
+    // Send payload exclusively to candidate rider
     io.to(`driver_${riderId}`).emit('new_order_offer', payload);
     io.to(`rider_${riderId}`).emit('new_order_offer', payload);
-    console.log(`[DISPATCH] Order ${orderId} offered to rider ${riderId} (${candidate.distanceKm} km)`);
+
+    // 20-Second Timeout: Auto-expire and move to next rider
+    const timer = setTimeout(async () => {
+      await pool.query(`
+        UPDATE order_rider_offers
+        SET status = 'expired', responded_at = NOW()
+        WHERE order_id = $1 AND rider_id = $2 AND status = 'offered'
+      `, [orderId, riderId]);
+
+      io.to(`driver_${riderId}`).emit('offer_expired', { orderId: Number(orderId) });
+      io.to(`rider_${riderId}`).emit('offer_expired', { orderId: Number(orderId) });
+
+      // Trigger dispatch to the next closest driver
+      dispatchNextRider(orderId, [riderId]);
+    }, 20000);
+
+    offerTimers.set(orderId, timer);
     return riderId;
   }
 
-  console.log(`[DISPATCH] No eligible rider found for order ${orderId}`);
   return null;
 }
 
@@ -124,7 +148,8 @@ const initSocket = (server) => {
       if (!id) return;
       currentDriverId = id;
       activeDriverSockets.set(id, socket.id);
-      pool.query('UPDATE riders SET is_online = true WHERE id = $1', [id]).catch(err =>
+      // Set rider status to idle if they aren't on an active delivery
+   pool.query("UPDATE riders SET status = 'idle' WHERE id = $1 AND status <> 'delivering'", [id]);
         console.error('[ONLINE STATUS ERROR]', err.message)
       );
       socket.join('active_riders');
@@ -176,7 +201,7 @@ const initSocket = (server) => {
       }
     });
 
-    socket.on('accept_order', async ({ orderId, riderId, driverId }) => {
+  socket.on('accept_order', async ({ orderId, riderId, driverId }) => {
       const id = cleanId(riderId || driverId || currentDriverId);
       if (!orderId || !id) return;
 
@@ -184,12 +209,8 @@ const initSocket = (server) => {
       try {
         await client.query('BEGIN');
 
-        // First rider to accept wins.
         const orderResult = await client.query(`
-          SELECT id, status, rider_id
-          FROM orders
-          WHERE id = $1
-          FOR UPDATE
+          SELECT id, status, rider_id FROM orders WHERE id = $1 FOR UPDATE
         `, [orderId]);
 
         if (!orderResult.rows.length) throw new Error('Order not found');
@@ -201,19 +222,17 @@ const initSocket = (server) => {
           return;
         }
 
-        const riderResult = await client.query(`
-          SELECT id, name, last_latitude, last_longitude
-          FROM riders
-          WHERE id = $1 AND is_online = true
-        `, [id]);
+        // Cancel 20s timeout timer
+        if (offerTimers.has(orderId)) {
+          clearTimeout(offerTimers.get(orderId));
+          offerTimers.delete(orderId);
+        }
 
-        if (!riderResult.rows.length) throw new Error('Rider is offline or not found');
-
-        await client.query(`
-          UPDATE orders
-          SET rider_id = $1, status = 'Accepted'
-          WHERE id = $2
-        `, [id, orderId]);
+        // Assign order and update status
+        await client.query("UPDATE orders SET rider_id = $1, status = 'Accepted' WHERE id = $2", [id, orderId]);
+        
+        // Update rider status to 'delivering' so they don't receive new offers
+        await client.query("UPDATE riders SET status = 'delivering' WHERE id = $1", [id]);
 
         await client.query(`
           INSERT INTO order_rider_offers (order_id, rider_id, status, responded_at)
@@ -222,33 +241,12 @@ const initSocket = (server) => {
           DO UPDATE SET status = 'accepted', responded_at = NOW()
         `, [orderId, id]);
 
-        await client.query(`
-          UPDATE order_rider_offers
-          SET status = 'expired', responded_at = NOW()
-          WHERE order_id = $1 AND rider_id <> $2 AND status = 'offered'
-        `, [orderId, id]);
-
         await client.query('COMMIT');
 
-        const rider = riderResult.rows[0];
-        const riderLocation = {
-          lat: parseFloat(rider.last_latitude),
-          lng: parseFloat(rider.last_longitude)
-        };
-
-        io.to(`order_${orderId}`).emit('order_accepted', {
-          orderId: Number(orderId),
-          riderId: Number(id),
-          riderLocation: Number.isFinite(riderLocation.lat) && Number.isFinite(riderLocation.lng)
-            ? riderLocation : null
-        });
-
-        // Tell all other riders who received this offer to remove it.
-        io.emit('order_taken', { orderId: Number(orderId), riderId: Number(id) });
+        io.to(`order_${orderId}`).emit('order_accepted', { orderId: Number(orderId), riderId: Number(id) });
         socket.emit('order_accept_success', { orderId: Number(orderId) });
       } catch (err) {
         try { await client.query('ROLLBACK'); } catch (_) {}
-        console.error('[ACCEPT ORDER ERROR]', err.message);
         socket.emit('order_accept_failed', { orderId, message: err.message });
       } finally {
         client.release();
@@ -259,61 +257,40 @@ const initSocket = (server) => {
       const id = cleanId(riderId || driverId || currentDriverId);
       if (!orderId || !id) return;
 
-      try {
-        await pool.query(`
-          INSERT INTO order_rider_offers (order_id, rider_id, status, responded_at)
-          VALUES ($1, $2, 'declined', NOW())
-          ON CONFLICT (order_id, rider_id)
-          DO UPDATE SET status = 'declined', responded_at = NOW()
-        `, [orderId, id]);
-
-        const nextRiderId = await dispatchNextRider(orderId, [id]);
-        socket.emit('order_declined', {
-          orderId: Number(orderId),
-          nextRiderId: nextRiderId ? Number(nextRiderId) : null
-        });
-      } catch (err) {
-        console.error('[DECLINE ORDER ERROR]', err.message);
+      if (offerTimers.has(orderId)) {
+        clearTimeout(offerTimers.get(orderId));
+        offerTimers.delete(orderId);
       }
+
+      await pool.query(`
+        INSERT INTO order_rider_offers (order_id, rider_id, status, responded_at)
+        VALUES ($1, $2, 'declined', NOW())
+        ON CONFLICT (order_id, rider_id)
+        DO UPDATE SET status = 'declined', responded_at = NOW()
+      `, [orderId, id]);
+
+      await dispatchNextRider(orderId, [id]);
     });
 
-    socket.on('leave_order_room', ({ orderId }) => {
-      if (orderId) socket.leave(`order_${orderId}`);
-    });
-    socket.on('leave_trial_room', ({ orderId }) => {
-      if (orderId) socket.leave(`order_${orderId}`);
+    socket.on('complete_delivery', async ({ riderId, orderId }) => {
+      const id = cleanId(riderId || currentDriverId);
+      // Mark delivery complete & set rider back to 'idle'
+      await pool.query("UPDATE orders SET status = 'Delivered' WHERE id = $1", [orderId]);
+      await pool.query("UPDATE riders SET status = 'idle' WHERE id = $1", [id]);
     });
 
     socket.on('driver_offline', async ({ driverId, riderId } = {}) => {
       const id = cleanId(driverId || riderId || currentDriverId);
       if (!id) return;
       activeDriverSockets.delete(id);
-      try {
-        await removeDriverLocation(id);
-        await pool.query('UPDATE riders SET is_online = false WHERE id = $1', [id]);
-      } catch (err) {
-        console.error('[OFFLINE ERROR]', err.message);
-      }
-    });
-
-    socket.on('disconnect', () => {
-      if (!currentDriverId) return;
-      const id = currentDriverId;
-      const disconnectedSocketId = socket.id;
-      setTimeout(async () => {
-        if (activeDriverSockets.get(id) !== disconnectedSocketId) return;
-        activeDriverSockets.delete(id);
-        try {
-          await removeDriverLocation(id);
-        } catch (err) {
-          console.error('[DISCONNECT CLEANUP]', err.message);
-        }
-      }, 5000);
+      await removeDriverLocation(id);
+      await pool.query("UPDATE riders SET status = 'offline' WHERE id = $1", [id]);
     });
   });
 
   return io;
 };
+
 
 const getIo = () => {
   if (!io) throw new Error('Socket.io has not been initialized!');
