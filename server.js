@@ -719,6 +719,7 @@ app.get('/api/admin/orders', async (req, res) => {
 });
 
 // PATCH /api/orders/:id/status (Update Order Status)
+// PATCH /api/orders/:id/status (Update Order Status)
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -737,7 +738,18 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    res.json({ message: 'Order status updated', order: result.rows[0] });
+    const updatedOrder = result.rows[0];
+
+    // ✅ FIX: Free up rider if order is delivered via HTTP PATCH
+    if ((status === 'Delivered' || status === 'delivered') && updatedOrder.rider_id) {
+      await pool.query(
+        "UPDATE riders SET status = 'idle' WHERE id = $1",
+        [updatedOrder.rider_id]
+      );
+      console.log(`✅ [HTTP FIX] Rider ${updatedOrder.rider_id} reset to 'idle' for Order ${id}`);
+    }
+
+    res.json({ message: 'Order status updated', order: updatedOrder });
   } catch (err) {
     console.error('Error updating order status:', err);
     res.status(500).json({ message: 'Server error updating order status' });
