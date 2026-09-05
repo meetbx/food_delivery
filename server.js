@@ -721,18 +721,26 @@ app.get('/api/admin/orders', async (req, res) => {
 // PATCH /api/orders/:id/status (Update Order Status)
 // PATCH /api/orders/:id/status (Update Order Status)
 
+// PATCH /api/orders/:id/status (Update Order Status)
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, driverId, riderId } = req.body;
 
     if (!status) {
       return res.status(400).json({ message: 'Status is required' });
     }
 
+    const activeRiderId = driverId || riderId || null;
+
+    // 1. Update order status and set rider_id if provided
     const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *;',
-      [status, id]
+      `UPDATE orders 
+       SET status = $1, 
+           rider_id = COALESCE($2, rider_id) 
+       WHERE id = $3 
+       RETURNING *;`,
+      [status, activeRiderId, id]
     );
 
     if (result.rows.length === 0) {
@@ -741,22 +749,24 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
     const updatedOrder = result.rows[0];
 
-    // ✅ FIX: Free up rider if order is delivered via HTTP PATCH
-    if ((status === 'Delivered' || status === 'delivered') && updatedOrder.rider_id) {
-      await pool.query(
-        "UPDATE riders SET status = 'idle' WHERE id = $1",
-        [updatedOrder.rider_id]
-      );
-      console.log(`✅ [HTTP FIX] Rider ${updatedOrder.rider_id} reset to 'idle' for Order ${id}`);
+    // 2. Free up rider when order status is Delivered
+    if (status === 'Delivered' || status === 'delivered') {
+      const targetRiderId = activeRiderId || updatedOrder.rider_id;
+      if (targetRiderId) {
+        await pool.query(
+          "UPDATE riders SET status = 'idle' WHERE id = $1",
+          [targetRiderId]
+        );
+        console.log(`✅ Rider ${targetRiderId} status set to 'idle' for Order ${id}`);
+      }
     }
 
     res.json({ message: 'Order status updated', order: updatedOrder });
   } catch (err) {
     console.error('Error updating order status:', err);
-    res.status(500).json({ message: 'Server error updating order status' });
+    res.status(500).json({ message: 'Server error updating order status', error: err.message });
   }
 });
-
 
 
 // GET /api/orders/:id (Live Tracking Endpoint)
